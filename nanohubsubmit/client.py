@@ -81,6 +81,15 @@ _JOB_ID_MARKER = re.compile(
 )
 _PROGRESS_LINE_RE = re.compile(r"^=SUBMIT-PROGRESS=>\s+(.*)$")
 _PROGRESS_KV_RE = re.compile(r"([A-Za-z_%][A-Za-z0-9_%]*)=([^\s]+)")
+_PARAMETER_STATE_RANKS = {
+    "waiting": 1,
+    "setup": 2,
+    "setting_up": 2,
+    "executing": 3,
+    "finished": 4,
+    "failed": 4,
+    "aborted": 4,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +337,35 @@ def _parse_parameter_status_counts(parameter_path: Path) -> dict[str, int]:
 def _normalize_parameter_state(text: str) -> str:
     """Normalize parameterCombinations state values to snake-case."""
     return str(text).strip().lower().replace(" ", "_")
+
+
+def _parameter_state_rank(state: str) -> int:
+    """Return lifecycle rank for per-instance progress state."""
+    normalized = _normalize_parameter_state(state)
+    return int(_PARAMETER_STATE_RANKS.get(normalized, 0))
+
+
+def _merge_instance_states(
+    previous: dict[int, str], incoming: dict[int, str]
+) -> dict[int, str]:
+    """Merge instance states while preventing backward state transitions."""
+    merged = {int(k): _normalize_parameter_state(v) for k, v in previous.items()}
+    for index, state in incoming.items():
+        normalized = _normalize_parameter_state(state)
+        current = merged.get(index)
+        if current is None:
+            merged[index] = normalized
+            continue
+        if _parameter_state_rank(normalized) >= _parameter_state_rank(current):
+            merged[index] = normalized
+    return merged
+
+
+def _monotonic_percent(previous: float, candidate: float) -> float:
+    """Clamp progress percentage to a non-decreasing timeline."""
+    if candidate < previous:
+        return previous
+    return candidate
 
 
 def _parse_parameter_instance_states(parameter_path: Path) -> dict[int, str]:
@@ -894,6 +932,7 @@ class _NotebookProgressMonitor:
             else None
         )
         self._last_instance_states: dict[int, str] = {}
+        self._max_percent_done = 0.0
 
         self._title: Any = None
         self._summary_label: Any = None
@@ -1041,10 +1080,11 @@ class _NotebookProgressMonitor:
         states = _parse_parameter_instance_states(self._parameter_path)
         if not states:
             return
-        if states == self._last_instance_states:
+        merged_states = _merge_instance_states(self._last_instance_states, states)
+        if merged_states == self._last_instance_states:
             return
-        self._last_instance_states = dict(states)
-        self._apply_instance_states(states)
+        self._last_instance_states = dict(merged_states)
+        self._apply_instance_states(merged_states)
 
     def _apply_progress_update(self, update: dict[str, Any]) -> None:
         if self._overall_bar is None or self._counts_label is None:
@@ -1064,10 +1104,15 @@ class _NotebookProgressMonitor:
             percent_done = (100.0 * float(done) / float(total)) if total > 0 else 0.0
 
         with self._lock:
-            self._overall_bar.value = max(0.0, min(float(percent_done), 100.0))
+            candidate_percent = max(0.0, min(float(percent_done), 100.0))
+            effective_percent = _monotonic_percent(
+                self._max_percent_done, candidate_percent
+            )
+            self._max_percent_done = effective_percent
+            self._overall_bar.value = effective_percent
             if failed > 0 or aborted > 0:
                 self._overall_bar.bar_style = "danger"
-            elif float(percent_done) >= 100.0:
+            elif effective_percent >= 100.0:
                 self._overall_bar.bar_style = "success"
             elif executing > 0:
                 self._overall_bar.bar_style = "info"
@@ -1084,7 +1129,8 @@ class _NotebookProgressMonitor:
 
         state_counts: dict[str, int] = {}
         for state in states.values():
-            state_counts[state] = state_counts.get(state, 0) + 1
+            normalized_state = _normalize_parameter_state(state)
+            state_counts[normalized_state] = state_counts.get(normalized_state, 0) + 1
 
         progress = _progress_from_status_counts(state_counts)
         if progress is not None:
@@ -1104,7 +1150,7 @@ class _NotebookProgressMonitor:
         rows: list[Any] = []
 
         for index in sorted(states):
-            state = states[index]
+            state = _normalize_parameter_state(states[index])
             bar = self._instance_bars.get(index)
             label = self._instance_labels.get(index)
             row = self._instance_rows.get(index)
@@ -1255,9 +1301,11 @@ class NanoHUBSubmitClient:
         """Create Jupyter monitor for submit progress when available/enabled."""
         if not self.jupyter_auto_progress:
             return None
-        if request.progress != ProgressMode.SUBMIT:
+        if request.local:
             return None
         if not _is_jupyter_environment():
+            return None
+        if request.run_name is None and request.progress != ProgressMode.SUBMIT:
             return None
 
         monitor = _NotebookProgressMonitor(

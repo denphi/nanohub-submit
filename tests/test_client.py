@@ -13,6 +13,8 @@ from nanohubsubmit.client import (
     AuthenticationError,
     CommandExecutionError,
     NanoHUBSubmitClient,
+    _merge_instance_states,
+    _monotonic_percent,
     _parse_parameter_instance_states,
     _is_stream_tty,
 )
@@ -292,6 +294,23 @@ def test_parse_parameter_instance_states_extracts_indexed_states(tmp_path: Path)
 
     states = _parse_parameter_instance_states(parameter_file)
     assert states == {1: "waiting", 2: "executing", 3: "finished"}
+
+
+def test_merge_instance_states_is_monotonic() -> None:
+    previous = {1: "executing", 2: "finished", 3: "setup"}
+    incoming = {1: "waiting", 2: "executing", 3: "setting_up", 4: "waiting"}
+    merged = _merge_instance_states(previous, incoming)
+    assert merged == {
+        1: "executing",
+        2: "finished",
+        3: "setting_up",
+        4: "waiting",
+    }
+
+
+def test_monotonic_percent_never_decreases() -> None:
+    assert _monotonic_percent(20.0, 10.0) == pytest.approx(20.0)
+    assert _monotonic_percent(20.0, 35.0) == pytest.approx(35.0)
 
 
 def test_client_status_uses_socket_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -584,6 +603,20 @@ def test_client_submit_local_fast_path_runs_immediately() -> None:
     assert len(tracked) == 1
     assert tracked[0].local is True
     assert tracked[0].command == sys.executable
+
+
+def test_client_submit_local_echo_hi() -> None:
+    client = _make_client()
+    result = client.submit(
+        SubmitRequest(
+            command="echo",
+            command_arguments=["hi"],
+            local=True,
+        ),
+        operation_timeout=5.0,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == "hi"
 
 
 def test_client_submit_local_fast_path_timeout() -> None:

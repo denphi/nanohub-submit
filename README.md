@@ -83,6 +83,24 @@ print(result.stdout)
 ```
 
 Equivalent to:
+`submit --local echo hi`
+
+```python
+from nanohubsubmit import NanoHUBSubmitClient, SubmitRequest
+
+client = NanoHUBSubmitClient()
+result = client.submit(
+    SubmitRequest(
+        command="echo",
+        command_arguments=["hi"],
+        local=True,
+    ),
+)
+print(result.returncode)  # 0
+print(result.stdout.strip())  # hi
+```
+
+Equivalent to:
 `submit --local --runName=echotest --progress submit -s, -p @@name=hub1,hub2,hub3 echo @@name`
 
 ```python
@@ -166,6 +184,8 @@ In Jupyter, this submit pattern (`run_name` + `progress=submit`) automatically
 shows live `ipywidgets` progress bars while the call is running:
 - overall submit progress from `=SUBMIT-PROGRESS=>` frames
 - per-instance bars from `parameterCombinations.csv`
+- state progression is monotonic (`waiting/setup -> executing -> finished|failed|aborted`)
+- overall percent is monotonic (will not move backward on delayed file updates)
 
 Disable this behavior with:
 `NanoHUBSubmitClient(jupyter_auto_progress=False)`.

@@ -142,3 +142,38 @@ def test_build_submit_args_rejects_empty_separator() -> None:
     )
     with pytest.raises(ValueError, match="--separator cannot be empty"):
         CommandBuilder.build_submit_args(request)
+
+
+def test_build_submit_args_matches_remote_espresso_example() -> None:
+    request = SubmitRequest(
+        command="espresso-7.1_pw",
+        command_arguments=["-i", "scf.in"],
+        input_files=["Si.UPF", "scf.in"],
+        n_cpus=4,
+        wall_time="00:30:00",
+        manager="espresso-7.1_mpi",
+        run_name="sireferenceremotescf",
+        environment={"OPTICDFTFileAction": "CREATESTORE:SAVE"},
+    )
+
+    args = CommandBuilder.build_submit_args(request)
+
+    assert args == [
+        "--inputfile",
+        "Si.UPF",
+        "--inputfile",
+        "scf.in",
+        "--nCpus",
+        "4",
+        "--wallTime",
+        "00:30:00",
+        "--env",
+        "OPTICDFTFileAction=CREATESTORE:SAVE",
+        "--runName",
+        "sireferenceremotescf",
+        "--manager",
+        "espresso-7.1_mpi",
+        "espresso-7.1_pw",
+        "-i",
+        "scf.in",
+    ]
