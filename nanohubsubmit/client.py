@@ -1308,21 +1308,15 @@ class NanoHUBSubmitClient:
             return [{"messageType": "parseArguments"}]
 
         if message_type == "argumentsParsed":
-            if state.action == "submit":
-                if state.local_execution:
-                    return [{"messageType": "startLocal"}]
-                return [{"messageType": "setupRemote"}]
-            return []
+            if state.local_execution:
+                return [{"messageType": "startLocal"}]
+            return [{"messageType": "setupRemote"}]
 
         if message_type == "serverReadyForInputMapping":
-            if state.action == "submit":
-                return [{"messageType": "inputFileInodesSent"}]
-            return []
+            return [{"messageType": "inputFileInodesSent"}]
 
         if message_type in {"noExportFiles", "exportFilesComplete"}:
-            if state.action == "submit":
-                return [{"messageType": "startRemote"}]
-            return []
+            return [{"messageType": "startRemote"}]
 
         if message_type == "serverReadyForIO":
             return [{"messageType": "serverReadyForIO"}]

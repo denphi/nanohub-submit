@@ -116,8 +116,14 @@ class _FakeSubmitServer(threading.Thread):
             elif message_type == "submitCommandFileInodesSent":
                 _send_json(conn, {"messageType": "noExportCommandFiles"})
             elif message_type == "parseArguments":
+                _send_json(conn, {"messageType": "argumentsParsed"})
+            elif message_type == "setupRemote":
+                _send_json(conn, {"messageType": "serverReadyForInputMapping"})
+            elif message_type == "inputFileInodesSent":
+                _send_json(conn, {"messageType": "noExportFiles"})
+            elif message_type == "startRemote":
                 _send_json(conn, {"messageType": "writeStdout", "text": "STATUS OK\n"})
-                _send_json(conn, {"messageType": "exit", "exitCode": 0})
+                _send_json(conn, {"messageType": "serverExit", "exitCode": 0})
                 return
 
     def _run_submit(self, conn: socket.socket) -> None:
@@ -204,6 +210,12 @@ class _FakeSubmitServer(threading.Thread):
                 elif message_type == "submitCommandFileInodesSent":
                     _send_json(conn, {"messageType": "noExportCommandFiles"})
                 elif message_type == "parseArguments":
+                    _send_json(conn, {"messageType": "argumentsParsed"})
+                elif message_type == "setupRemote":
+                    _send_json(conn, {"messageType": "serverReadyForInputMapping"})
+                elif message_type == "inputFileInodesSent":
+                    _send_json(conn, {"messageType": "noExportFiles"})
+                elif message_type == "startRemote":
                     # Keep the session open and never emit exit to trigger client timeout.
                     continue
         except EOFError:
@@ -251,6 +263,8 @@ def test_client_status_uses_socket_protocol(monkeypatch: pytest.MonkeyPatch) -> 
     assert result.authenticated is True
     assert result.server_version == "1.0.0"
     assert "parseArguments" in server.received_message_types
+    assert "setupRemote" in server.received_message_types
+    assert "startRemote" in server.received_message_types
 
 
 def test_client_submit_drives_remote_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -351,6 +365,12 @@ def test_client_raw_help_uses_command_file_handshake(monkeypatch: pytest.MonkeyP
                     elif message_type == "submitCommandFileInodesSent":
                         _send_json(self.conn, {"messageType": "noExportCommandFiles"})
                     elif message_type == "parseArguments":
+                        _send_json(self.conn, {"messageType": "argumentsParsed"})
+                    elif message_type == "setupRemote":
+                        _send_json(self.conn, {"messageType": "serverReadyForInputMapping"})
+                    elif message_type == "inputFileInodesSent":
+                        _send_json(self.conn, {"messageType": "noExportFiles"})
+                    elif message_type == "startRemote":
                         _send_json(
                             self.conn,
                             {"messageType": "writeStdout", "text": "tools:\n  abacus\n"},
@@ -373,3 +393,5 @@ def test_client_raw_help_uses_command_file_handshake(monkeypatch: pytest.MonkeyP
     assert "abacus" in result.stdout
     assert "submitCommandFileInodesSent" in server.received_message_types
     assert "parseArguments" in server.received_message_types
+    assert "setupRemote" in server.received_message_types
+    assert "startRemote" in server.received_message_types
