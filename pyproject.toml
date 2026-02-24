@@ -35,6 +35,3 @@ version = {file = "VERSION"}
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["nanohubsubmit*"]
-
-[tool.pytest.ini_options]
-pythonpath = ["."]
