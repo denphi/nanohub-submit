@@ -126,8 +126,37 @@ result = client.submit(
     ),
     operation_timeout=600.0,
 )
-print(result.returncode)
+
+print("returncode:", result.returncode)
+timed_out = getattr(result, "timed_out", False)
+process_ids = getattr(result, "process_ids", None)
+if process_ids is None:
+    process_ids = [result.job_id] if result.job_id is not None else []
+
+print("timed_out:", timed_out)
+print("job_id:", result.job_id)
+print("process_ids:", process_ids)
 print(result.stdout)
+
+progress_lines = [
+    line for line in result.stdout.splitlines()
+    if line.startswith("=SUBMIT-PROGRESS=>")
+]
+print("progress lines:", len(progress_lines))
+
+# If timeout happened after launch, keep tracking by known IDs.
+if hasattr(client, "monitor_tracked_runs"):
+    tracking = client.monitor_tracked_runs(
+        root=".",
+        include_live_status=True,
+        operation_timeout=60.0,
+    ).to_dict()
+    for item in tracking["runs"]:
+        run = item["run"]
+        if run["run_name"] == "runtest":
+            print("derived_state:", item["derived_state"])
+            print("latest_progress:", item["latest_progress"])
+            break
 ```
 
 ## Metadata utilities
