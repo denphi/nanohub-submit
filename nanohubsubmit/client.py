@@ -91,6 +91,20 @@ def _collect_environment() -> dict[str, str]:
     return environment
 
 
+def _is_stream_tty(stream: Any) -> bool:
+    isatty = getattr(stream, "isatty", None)
+    if not callable(isatty):
+        return False
+
+    if bool(getattr(stream, "closed", False)):
+        return False
+
+    try:
+        return bool(isatty())
+    except Exception:
+        return False
+
+
 def _discover_mount_device(path: str) -> str:
     try:
         proc = subprocess.run(
@@ -1201,12 +1215,7 @@ class NanoHUBSubmitClient:
                 },
                 {
                     "messageType": "isClientTTY",
-                    "isClientTTY": (
-                        not sys.stdin.closed
-                        and sys.stdin.isatty()
-                        and not sys.stdout.closed
-                        and sys.stdout.isatty()
-                    ),
+                    "isClientTTY": _is_stream_tty(sys.stdin) and _is_stream_tty(sys.stdout),
                 },
                 {"messageType": "pegasusVersion", "version": cfg.pegasus_version},
             ]

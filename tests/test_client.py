@@ -11,6 +11,7 @@ from nanohubsubmit.client import (
     AuthenticationError,
     CommandExecutionError,
     NanoHUBSubmitClient,
+    _is_stream_tty,
 )
 from nanohubsubmit.models import SubmitRequest
 from nanohubsubmit.wire import SubmitWireConnection
@@ -246,6 +247,30 @@ def _patch_connection(monkeypatch: pytest.MonkeyPatch, client_conn: socket.socke
         return client_conn
 
     monkeypatch.setattr(SubmitWireConnection, "_connect_uri", _connect_uri)
+
+
+class _NoClosedStream:
+    def __init__(self, tty: bool) -> None:
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+
+class _BrokenTTY:
+    closed = False
+
+    def isatty(self) -> bool:
+        raise OSError("tty check failed")
+
+
+def test_stream_tty_helper_handles_missing_closed_attr() -> None:
+    assert _is_stream_tty(_NoClosedStream(True)) is True
+    assert _is_stream_tty(_NoClosedStream(False)) is False
+
+
+def test_stream_tty_helper_handles_broken_isatty() -> None:
+    assert _is_stream_tty(_BrokenTTY()) is False
 
 
 def test_client_status_uses_socket_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
