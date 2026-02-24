@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Low-level transport for submit framed JSON protocol.
+
+This module handles URI parsing, TCP/TLS/UNIX socket creation, legacy handshake,
+and framing for `json <len>` lines used by submit server/client communication.
+"""
+
 import json
 import socket
 import ssl
@@ -18,6 +24,8 @@ class ConnectionClosedError(RuntimeError):
 
 @dataclass
 class ParsedURI:
+    """Normalized submit endpoint representation."""
+
     protocol: str
     host: str = ""
     port: int = 0
@@ -25,6 +33,7 @@ class ParsedURI:
 
 
 def parse_submit_uri(uri: str) -> ParsedURI:
+    """Parse submit URI strings used in listenURIs config entries."""
     # Legacy format is "tls://host:port" or "tcp://host:port" or "file:///path".
     parts = uri.split(":")
     if len(parts) == 3:
@@ -62,6 +71,7 @@ class SubmitWireConnection:
         return self._sock is not None
 
     def connect(self) -> None:
+        """Connect to the first reachable URI and complete protocol handshake."""
         if not self.listen_uris:
             raise WireProtocolError("no listen URIs configured")
 
@@ -80,6 +90,7 @@ class SubmitWireConnection:
         raise ConnectionError("failed to connect to submit server; " + "; ".join(errors))
 
     def close(self) -> None:
+        """Close underlying socket and clear local read buffer."""
         if self._sock is not None:
             try:
                 self._sock.close()
@@ -88,11 +99,13 @@ class SubmitWireConnection:
                 self._in_buffer = b""
 
     def send_json(self, message: dict[str, Any]) -> None:
+        """Send one JSON frame using submit wire framing."""
         payload = json.dumps(message).encode("utf-8")
         header = f"json {len(payload)}\n".encode("utf-8")
         self._send_all(header + payload)
 
     def receive_json(self, timeout: float | None) -> dict[str, Any] | None:
+        """Receive one framed JSON object, or `None` on read timeout."""
         line = self._read_line(timeout=timeout)
         if line is None:
             return None
@@ -114,6 +127,7 @@ class SubmitWireConnection:
             raise WireProtocolError("failed to decode server JSON message") from exc
 
     def _connect_uri(self, uri: str) -> socket.socket | ssl.SSLSocket:
+        """Open one configured endpoint URI as TCP/TLS/UNIX socket."""
         parsed = parse_submit_uri(uri)
         if parsed.protocol == "file":
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -135,6 +149,7 @@ class SubmitWireConnection:
         return context.wrap_socket(raw_sock, server_hostname=parsed.host)
 
     def _perform_handshake(self) -> None:
+        """Exchange SUBMIT handshake and capture server preferred frame size."""
         if self._sock is None:
             raise ConnectionError("connection is not open")
         handshake = "SUBMIT 0".ljust(32, " ").encode("utf-8")
@@ -148,6 +163,7 @@ class SubmitWireConnection:
         self.default_buffer_size = int(parts[-1])
 
     def _send_all(self, payload: bytes) -> None:
+        """Write the full payload, raising if connection breaks mid-write."""
         if self._sock is None:
             raise ConnectionError("connection is not open")
         view = memoryview(payload)
@@ -158,6 +174,7 @@ class SubmitWireConnection:
             view = view[written:]
 
     def _read_exact(self, size: int, timeout: float | None) -> bytes:
+        """Read exactly `size` bytes from socket/read-buffer."""
         if self._sock is None:
             raise ConnectionError("connection is not open")
         if size < 0:
@@ -177,6 +194,7 @@ class SubmitWireConnection:
         return data
 
     def _read_line(self, timeout: float | None) -> str | None:
+        """Read one newline-terminated frame header, or `None` on timeout."""
         if self._sock is None:
             raise ConnectionError("connection is not open")
 

@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Command-line interface for nanohubsubmit.
+
+The CLI is a thin adapter layer that maps argparse options to `SubmitRequest`
+and `NanoHUBSubmitClient` API calls.
+"""
+
 import argparse
 import json
 import shlex
@@ -12,6 +18,7 @@ from .utils import explore_submit_server, load_available_catalog
 
 
 def _parse_env(values: list[str]) -> dict[str, str | None]:
+    """Parse repeatable --env values into key/value mapping."""
     env: dict[str, str | None] = {}
     for item in values:
         if "=" in item:
@@ -29,6 +36,7 @@ def _parse_env(values: list[str]) -> dict[str, str | None]:
 def _resolve_command(
     command: str | None, command_line: list[str]
 ) -> tuple[str, list[str]]:
+    """Resolve command from either `--command` string or trailing args."""
     command_line = list(command_line)
     if command_line and command_line[0] == "--":
         command_line = command_line[1:]
@@ -46,6 +54,7 @@ def _resolve_command(
 
 
 def _emit_result(stdout: str, stderr: str) -> None:
+    """Write command result streams to standard output/error."""
     if stdout:
         sys.stdout.write(stdout)
     if stderr:
@@ -53,6 +62,7 @@ def _emit_result(stdout: str, stderr: str) -> None:
 
 
 def _emit_catalog_text(catalog: dict) -> None:
+    """Render catalog dictionary in stable human-readable text format."""
     for key in ("tools", "venues", "managers"):
         values = catalog.get(key, [])
         sys.stdout.write("%s:\n" % key)
@@ -66,6 +76,7 @@ def _emit_catalog_text(catalog: dict) -> None:
 def _add_verbose_argument(
     parser: argparse.ArgumentParser, *, default: object = False
 ) -> None:
+    """Attach standard verbose tracing flags to a parser/subparser."""
     parser.add_argument(
         "-v",
         "--verbose",
@@ -76,6 +87,7 @@ def _add_verbose_argument(
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build top-level argparse parser for all supported CLI commands."""
     parser = argparse.ArgumentParser(
         prog="nanohub-submit",
         description="Modern standalone client for NanoHUB submit.",
@@ -271,6 +283,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point returning process-like exit status code."""
     parser = build_parser()
     ns = parser.parse_args(argv)
     verbose = bool(getattr(ns, "verbose", False))

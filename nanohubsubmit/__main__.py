@@ -1,3 +1,5 @@
+"""Module entry point for `python -m nanohubsubmit`."""
+
 from .cli import main
 
 

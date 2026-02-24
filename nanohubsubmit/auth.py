@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""Authentication and sign-on credential helpers for submit protocol sessions.
+
+This module centralizes how credentials are discovered from environment/session
+state and how optional challenge-response hashes are produced when the server
+requests encrypted sign-on.
+"""
+
 import base64
 import getpass
 import hashlib
@@ -11,6 +18,7 @@ from dataclasses import dataclass
 
 
 def _read_resources_file(path: str) -> dict[str, str]:
+    """Read legacy NanoHUB resources files and map auth-related keys."""
     attributes: dict[str, str] = {}
     if not path or not os.path.exists(path):
         return attributes
@@ -31,6 +39,7 @@ def _read_resources_file(path: str) -> dict[str, str]:
 
 
 def _load_session_attributes() -> dict[str, str]:
+    """Merge discovered session attributes from well-known resource locations."""
     paths: list[str] = []
     if "SESSIONDIR" in os.environ:
         paths.append(os.path.join(os.environ["SESSIONDIR"], "resources"))
@@ -44,6 +53,7 @@ def _load_session_attributes() -> dict[str, str]:
 
 
 def _compute_private_fingerprint(private_key_path: str) -> str | None:
+    """Compute the submit-compatible private key fingerprint via OpenSSL tools."""
     if not private_key_path or not os.path.exists(private_key_path):
         return None
 
@@ -78,6 +88,8 @@ def _compute_private_fingerprint(private_key_path: str) -> str | None:
 
 @dataclass
 class SignonCredentials:
+    """Credential bundle used to build sign-on frames for the submit server."""
+
     user_name: str
     sudo_user_name: str | None = None
     ws_user_name: str | None = None
@@ -90,6 +102,7 @@ class SignonCredentials:
     private_key_path: str | None = None
 
     def has_any_auth(self) -> bool:
+        """Return whether any usable authentication mode is available."""
         return any(
             [
                 self.session_token,
@@ -99,6 +112,7 @@ class SignonCredentials:
         )
 
     def to_signon_messages(self) -> list[dict[str, object]]:
+        """Build ordered sign-on messages expected by submit protocol."""
         user_message: dict[str, object] = {
             "messageType": "userName",
             "userName": self.user_name,
@@ -130,6 +144,7 @@ class SignonCredentials:
         server_id_hex: str,
         encrypted_message: str,
     ) -> str | None:
+        """Build SHA256 authentication hash for encrypted sign-on challenges."""
         if not self.private_key_path:
             return None
         if not os.path.exists(self.private_key_path):
@@ -175,6 +190,7 @@ def load_signon_credentials(
     private_fingerprint: str | None = None,
     private_key_path: str | None = None,
 ) -> SignonCredentials:
+    """Resolve runtime credentials from args, env vars, and session resources."""
     session_attributes = _load_session_attributes()
 
     resolved_user = username or os.environ.get("NANOHUB_SUBMIT_USER") or getpass.getuser()

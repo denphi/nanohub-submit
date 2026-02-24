@@ -14,9 +14,22 @@ def _live_enabled() -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _live_remote_enabled() -> bool:
+    value = os.environ.get("NANOHUBSUBMIT_LIVE_REMOTE", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _live_config_path() -> str | None:
     value = os.environ.get("NANOHUBSUBMIT_CONFIG_PATH", "").strip()
     return value or None
+
+
+def _live_remote_example_command() -> str:
+    value = os.environ.get(
+        "NANOHUBSUBMIT_REMOTE_COMMAND",
+        "/apps/pegtut/current/examples/capacitor_voltage/sim1.py",
+    )
+    return value.strip()
 
 
 def _make_live_client(local_fast_path: bool = True) -> NanoHUBSubmitClient:
@@ -104,3 +117,38 @@ def test_live_submit_local_parameter_sweep_submit_progress(
     assert (run_path / "01" / "echotest_01.stdout").is_file()
     assert (run_path / "02" / "echotest_02.stdout").is_file()
     assert (run_path / "03" / "echotest_03.stdout").is_file()
+
+
+@pytest.mark.skipif(
+    not _live_remote_enabled(),
+    reason=(
+        "remote live submit test is disabled. "
+        "Set NANOHUBSUBMIT_LIVE_REMOTE=1 to enable."
+    ),
+)
+def test_live_submit_remote_parameter_sweep_submit_progress() -> None:
+    command = _live_remote_example_command()
+    if not command:
+        pytest.skip("no remote command path configured")
+    if not os.path.exists(command):
+        pytest.skip("remote command path not found: %s" % command)
+
+    client = _make_live_client()
+    result = client.submit(
+        SubmitRequest(
+            command=command,
+            command_arguments=["--Vin", "@@Vin"],
+            run_name="runtest",
+            parameters=["@@Vin=1,2,3,4,5"],
+            progress=ProgressMode.SUBMIT,
+        ),
+        operation_timeout=600.0,
+    )
+    assert result.returncode == 0, result.to_dict()
+    progress_lines = [
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith("=SUBMIT-PROGRESS=>")
+    ]
+    assert progress_lines, result.to_dict()
+    assert any("executing=" in line for line in progress_lines), result.to_dict()

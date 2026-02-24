@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Configuration parsing for legacy submit-client.conf files.
+
+Only the subset needed by this modern client is parsed from the `[client]`
+section.
+"""
+
 import os
 import re
 from dataclasses import dataclass, field
@@ -19,10 +25,12 @@ class SubmitClientConfig:
 
 
 def _parse_bool(value: str) -> bool:
+    """Parse legacy submit booleans where only literal 'true' enables a flag."""
     return value.strip().lower() == "true"
 
 
 def _strip_comments(record: str) -> str:
+    """Drop inline comments while preserving leading assignment content."""
     hash_pos = record.find("#")
     if hash_pos == -1:
         return record
@@ -31,9 +39,10 @@ def _strip_comments(record: str) -> str:
 
 def load_submit_client_config(path: str = DEFAULT_CONFIG_PATH) -> SubmitClientConfig:
     """
-    Parse legacy submit client config format.
+    Parse submit client configuration from disk.
 
-    Only the [client] section is interpreted.
+    Unknown keys are ignored to preserve compatibility with richer config files
+    used by legacy submit implementations.
     """
 
     cfg = SubmitClientConfig()

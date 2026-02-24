@@ -43,6 +43,13 @@ NANOHUBSUBMIT_LIVE=1 NANOHUBSUBMIT_CONFIG_PATH=/etc/submit/submit-client.conf \
 python3 -m pytest -q tests/test_live_client.py
 ```
 
+Optional remote live sweep test (long-running, disabled by default):
+
+```bash
+NANOHUBSUBMIT_LIVE=1 NANOHUBSUBMIT_LIVE_REMOTE=1 \
+python3 -m pytest -q tests/test_live_client.py -k remote_parameter_sweep
+```
+
 ## CLI examples
 
 ```bash
@@ -101,6 +108,27 @@ print(result.stdout)
 With `run_name="echotest"` this creates `echotest/` with
 `parameterCombinations.csv`, per-instance subdirectories (`01`, `02`, ...), and
 `echotest_XX.stdout` files.
+
+Equivalent to:
+`submit --runName=runtest --progress submit -p @@Vin=1,2,3,4,5 /apps/pegtut/current/examples/capacitor_voltage/sim1.py --Vin @@Vin`
+
+```python
+from nanohubsubmit import NanoHUBSubmitClient, ProgressMode, SubmitRequest
+
+client = NanoHUBSubmitClient(verbose=True)
+result = client.submit(
+    SubmitRequest(
+        command="/apps/pegtut/current/examples/capacitor_voltage/sim1.py",
+        command_arguments=["--Vin", "@@Vin"],
+        run_name="runtest",
+        parameters=["@@Vin=1,2,3,4,5"],
+        progress=ProgressMode.SUBMIT,
+    ),
+    operation_timeout=600.0,
+)
+print(result.returncode)
+print(result.stdout)
+```
 
 ## Metadata utilities
 

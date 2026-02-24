@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Core typed request and enum models for nanohubsubmit."""
+
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Mapping
@@ -18,7 +20,11 @@ class ProgressMode(str, Enum):
 
 @dataclass
 class SubmitRequest:
-    """Typed request data for a job submission command."""
+    """Typed request data for a job submission command.
+
+    The fields intentionally mirror submit CLI options so callers can construct
+    requests programmatically without stringly-typed argument handling.
+    """
 
     command: str
     command_arguments: list[str] = field(default_factory=list)
@@ -62,5 +68,6 @@ class SubmitRequest:
     show: bool = False
 
     def __post_init__(self) -> None:
+        """Validate basic required shape at construction time."""
         if not self.command.strip():
             raise ValueError("command must be a non-empty string")

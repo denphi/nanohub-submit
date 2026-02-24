@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+"""High-level submit client implementation.
+
+This module contains:
+- low-level request/session helpers used by the submit wire protocol
+- validation and diagnostics models (`doctor`, `preflight`, session discovery)
+- the main `NanoHUBSubmitClient` API for submit/status/kill/catalog flows
+"""
+
 import csv
 import hashlib
 import itertools
@@ -72,7 +80,12 @@ _JOB_ID_MARKER = re.compile(
 )
 
 
+# ---------------------------------------------------------------------------
+# Internal helper functions used by diagnostics, local execution, and protocol
+# framing preparation.
+# ---------------------------------------------------------------------------
 def _resolve_client_version() -> str:
+    """Resolve installed package version for protocol self-identification."""
     try:
         return package_version("nanohubsubmit")
     except PackageNotFoundError:
@@ -80,6 +93,7 @@ def _resolve_client_version() -> str:
 
 
 def _collect_environment() -> dict[str, str]:
+    """Collect environment variables safe to forward to submit server."""
     environment: dict[str, str] = {}
     for key, value in os.environ.items():
         if key in _ENV_BLACKLIST:
@@ -97,6 +111,7 @@ def _collect_environment() -> dict[str, str]:
 
 
 def _is_stream_tty(stream: Any) -> bool:
+    """Return whether stream looks like an open TTY-like object."""
     isatty = getattr(stream, "isatty", None)
     if not callable(isatty):
         return False
@@ -120,6 +135,7 @@ def _format_submit_progress_line(
     setting_up: int,
     total: int,
 ) -> str:
+    """Render one submit-style progress line for local fast-path sweeps."""
     completed = finished + failed + aborted
     percent_done = (100.0 * float(completed) / float(total)) if total > 0 else 100.0
     return (
@@ -142,6 +158,7 @@ def _format_submit_progress_line(
 def _expand_local_parameter_sweep(
     request: SubmitRequest,
 ) -> list[dict[str, str]]:
+    """Expand request parameters into cartesian product substitution maps."""
     if not request.parameters:
         return [{}]
 
@@ -177,6 +194,7 @@ def _expand_local_parameter_sweep(
 
 
 def _apply_substitutions(text: str, substitutions: dict[str, str]) -> str:
+    """Apply simple token replacement (e.g., @@name) for one sweep instance."""
     rendered = str(text)
     for key, value in substitutions.items():
         rendered = rendered.replace(key, value)
@@ -184,11 +202,13 @@ def _apply_substitutions(text: str, substitutions: dict[str, str]) -> str:
 
 
 def _write_text_file(path: str, text: str) -> None:
+    """Write UTF-8 text to disk, replacing existing files."""
     with open(path, "w", encoding="utf-8") as fp:
         fp.write(text)
 
 
 def _discover_mount_device(path: str) -> str:
+    """Infer mount device identifier compatible with legacy submit metadata."""
     try:
         proc = subprocess.run(
             ["df", "-P", path],
@@ -216,6 +236,7 @@ def _discover_mount_device(path: str) -> str:
 
 
 def _file_properties(path: str, mount_device: str) -> dict[str, object]:
+    """Collect file metadata fields expected by submit protocol context frames."""
     abs_path = os.path.abspath(path)
     mount_point = ""
     if os.path.exists(abs_path):
@@ -254,6 +275,7 @@ def _file_properties(path: str, mount_device: str) -> dict[str, object]:
 
 
 def _parse_parameter_status_counts(parameter_path: Path) -> dict[str, int]:
+    """Parse per-state counts from `parameterCombinations.csv` if present."""
     counts: dict[str, int] = {}
     if not parameter_path.exists():
         return counts
@@ -284,6 +306,7 @@ def _infer_session_state(
     saw_start_marker: bool,
     saw_finish_marker: bool,
 ) -> str:
+    """Infer overall run state from markers and parameter status counts."""
     if any(status_counts.get(state, 0) > 0 for state in _STATUS_RUNNING_STATES):
         return "running"
     if status_counts:
@@ -316,17 +339,21 @@ class CommandResult:
 
     @property
     def ok(self) -> bool:
+        """True when `returncode == 0`."""
         return self.returncode == 0
 
 
 @dataclass
 class ValidationCheck:
+    """One validation/doctor finding with severity and message."""
+
     name: str
     ok: bool
     severity: str
     message: str
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to JSON-friendly dictionary."""
         return {
             "name": self.name,
             "ok": self.ok,
@@ -337,11 +364,14 @@ class ValidationCheck:
 
 @dataclass
 class SubmitValidationResult:
+    """Aggregate validation result for a submit request."""
+
     ok: bool
     args: list[str]
     checks: list[ValidationCheck]
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize validation result and all checks."""
         return {
             "ok": self.ok,
             "args": list(self.args),
@@ -351,6 +381,8 @@ class SubmitValidationResult:
 
 @dataclass
 class DoctorReport:
+    """Diagnostic report covering config, credentials, and optional probe."""
+
     ok: bool
     checks: list[ValidationCheck]
     server_version: str | None = None
@@ -358,6 +390,7 @@ class DoctorReport:
     connected_uri: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize doctor report to plain dictionaries/lists."""
         return {
             "ok": self.ok,
             "checks": [check.to_dict() for check in self.checks],
@@ -369,6 +402,8 @@ class DoctorReport:
 
 @dataclass
 class SessionStatusProbe:
+    """Optional live probe for inferred job IDs via `submit --status`."""
+
     job_ids: list[int]
     returncode: int | None = None
     stdout: str = ""
@@ -377,9 +412,11 @@ class SessionStatusProbe:
 
     @property
     def ok(self) -> bool:
+        """True when no probe error and return code is successful."""
         return self.error is None and self.returncode == 0
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize probe data including computed `ok` state."""
         return {
             "job_ids": list(self.job_ids),
             "returncode": self.returncode,
@@ -392,6 +429,8 @@ class SessionStatusProbe:
 
 @dataclass
 class LocalSessionInfo:
+    """Filesystem-derived session summary discovered under a root directory."""
+
     path: str
     run_name: str
     inferred_job_ids: list[int]
@@ -401,6 +440,7 @@ class LocalSessionInfo:
     last_updated: float
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize local session summary."""
         return {
             "path": self.path,
             "run_name": self.run_name,
@@ -414,15 +454,19 @@ class LocalSessionInfo:
 
 @dataclass
 class SessionsReport:
+    """Collection of discovered sessions with optional live status probe."""
+
     sessions: list[LocalSessionInfo]
     inferred_job_ids: list[int]
     live_probe: SessionStatusProbe | None = None
 
     @property
     def ok(self) -> bool:
+        """True when live probe is absent or succeeded."""
         return self.live_probe is None or self.live_probe.ok
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize session report and nested session/probe payloads."""
         return {
             "ok": self.ok,
             "sessions": [session.to_dict() for session in self.sessions],
@@ -433,6 +477,8 @@ class SessionsReport:
 
 @dataclass
 class SimulationRunRecord:
+    """In-memory history entry for one client `submit(...)` call."""
+
     sequence: int
     started_at: float
     finished_at: float
@@ -446,6 +492,7 @@ class SimulationRunRecord:
     run_name: str | None
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize run tracking record."""
         return {
             "sequence": self.sequence,
             "started_at": self.started_at,
@@ -471,6 +518,8 @@ class AuthenticationError(CommandExecutionError):
 
 @dataclass
 class _SessionState:
+    """Mutable protocol state accumulated during one wire session."""
+
     client_id_hex: str
     action: str
     local_execution: bool
@@ -486,6 +535,9 @@ class _SessionState:
     server_messages: list[dict[str, Any]] = field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# Main public client API.
+# ---------------------------------------------------------------------------
 class NanoHUBSubmitClient:
     """Modern client that talks directly to submit server over its socket protocol."""
 
@@ -512,6 +564,13 @@ class NanoHUBSubmitClient:
         verbose_stream: TextIO | None = None,
         local_fast_path: bool = True,
     ) -> None:
+        """Initialize a submit client with optional config/auth overrides.
+
+        Args map closely to legacy submit behavior:
+        - config/network settings control wire connection setup.
+        - auth settings override discovered credentials.
+        - timing options control connect/poll/keepalive behavior.
+        """
         self.config_path = config_path
         self.listen_uris_override = listen_uris
         self.submit_ssl_ca_override = submit_ssl_ca
@@ -539,6 +598,7 @@ class NanoHUBSubmitClient:
         self._run_sequence = 0
 
     def _verbose_log(self, message: str) -> None:
+        """Emit verbose diagnostic lines when `verbose=True`."""
         if not self.verbose:
             return
         stream = self.verbose_stream if self.verbose_stream is not None else sys.stderr
@@ -549,6 +609,7 @@ class NanoHUBSubmitClient:
             pass
 
     def _trace_message(self, direction: str, message: dict[str, Any]) -> None:
+        """Emit compact, human-friendly traces for protocol messages."""
         if not self.verbose:
             return
 
@@ -575,6 +636,11 @@ class NanoHUBSubmitClient:
     def submit(
         self, request: SubmitRequest, *, operation_timeout: float | None = None
     ) -> CommandResult:
+        """Submit a command request.
+
+        Local requests run through the local fast path. Remote requests use the
+        submit wire protocol.
+        """
         started_at = time.time()
         if request.local:
             if not self.local_fast_path:
@@ -601,6 +667,7 @@ class NanoHUBSubmitClient:
     def status(
         self, job_ids: list[int], *, operation_timeout: float | None = None
     ) -> CommandResult:
+        """Run `submit --status` equivalent for one or more job IDs."""
         args = CommandBuilder.build_status_args(job_ids)
         return self._run(
             action="status",
@@ -612,6 +679,7 @@ class NanoHUBSubmitClient:
     def kill(
         self, job_ids: list[int], *, operation_timeout: float | None = None
     ) -> CommandResult:
+        """Run `submit --kill` equivalent for one or more job IDs."""
         args = CommandBuilder.build_kill_args(job_ids)
         return self._run(
             action="kill",
@@ -626,6 +694,7 @@ class NanoHUBSubmitClient:
         *,
         operation_timeout: float | None = None,
     ) -> CommandResult:
+        """Run `submit --venueStatus` with optional venue filters."""
         args = CommandBuilder.build_venue_status_args(venues)
         return self._run(
             action="venue-status",
@@ -637,6 +706,7 @@ class NanoHUBSubmitClient:
     def raw(
         self, args: list[str], *, operation_timeout: float | None = None
     ) -> CommandResult:
+        """Execute raw submit-style args through the wire protocol."""
         if not args:
             raise ValueError("args cannot be empty")
         return self._run(
@@ -653,6 +723,7 @@ class NanoHUBSubmitClient:
         include_raw_help: bool = False,
         operation_timeout: float = 60.0,
     ) -> "SubmitCatalog":
+        """Load catalog on-demand and cache it for this client instance."""
         if not refresh and self._catalog_cache is not None:
             if include_raw_help and not self._catalog_cache.raw_help:
                 pass
@@ -670,12 +741,15 @@ class NanoHUBSubmitClient:
         return catalog
 
     def invalidate_catalog_cache(self) -> None:
+        """Clear cached catalog so next `get_catalog` reloads from server."""
         self._catalog_cache = None
 
     def list_tracked_runs(self) -> list[SimulationRunRecord]:
+        """Return immutable copy of in-memory submit run history."""
         return list(self._run_history)
 
     def clear_tracked_runs(self) -> None:
+        """Clear tracked submit run history for current client instance."""
         self._run_history = []
         self._run_sequence = 0
 
@@ -687,6 +761,11 @@ class NanoHUBSubmitClient:
         operation_timeout: float = 60.0,
         extra_existing_paths: list[str] | None = None,
     ) -> SubmitValidationResult:
+        """Run local preflight checks for a submit request.
+
+        Checks include command shape, path existence, compatibility warnings,
+        and optional server catalog lookups.
+        """
         checks: list[ValidationCheck] = []
         args: list[str] = []
 
@@ -968,6 +1047,10 @@ class NanoHUBSubmitClient:
         operation_timeout: float = 60.0,
         extra_existing_paths: list[str] | None = None,
     ) -> SubmitValidationResult:
+        """Convenience wrapper over `validate_submit_request`.
+
+        Catalog checks are enabled automatically for non-local requests.
+        """
         return self.validate_submit_request(
             request,
             check_catalog=not request.local,
@@ -983,6 +1066,7 @@ class NanoHUBSubmitClient:
         started_at: float,
         finished_at: float,
     ) -> None:
+        """Append one run-history record after every submit invocation."""
         self._run_sequence += 1
         self._run_history.append(
             SimulationRunRecord(
@@ -1001,6 +1085,7 @@ class NanoHUBSubmitClient:
         )
 
     def doctor(self, *, probe_server: bool = True) -> DoctorReport:
+        """Run local diagnostics and optional live server auth probe."""
         checks: list[ValidationCheck] = []
         server_version: str | None = None
         server_capabilities: dict[str, bool] = {}
@@ -1186,6 +1271,11 @@ class NanoHUBSubmitClient:
         include_live_status: bool = False,
         limit: int | None = None,
     ) -> SessionsReport:
+        """Discover local run directories and infer session/job state.
+
+        This scans a filesystem tree for known submit marker files and optional
+        `parameterCombinations.csv` status content.
+        """
         if max_depth < 0:
             raise ValueError("max_depth cannot be negative")
 
@@ -1295,6 +1385,7 @@ class NanoHUBSubmitClient:
         )
 
     def _load_config(self) -> SubmitClientConfig:
+        """Load and apply runtime config overrides."""
         cfg = load_submit_client_config(self.config_path)
         if self.listen_uris_override is not None:
             cfg.listen_uris = list(self.listen_uris_override)
@@ -1309,6 +1400,7 @@ class NanoHUBSubmitClient:
         return cfg
 
     def _load_credentials(self) -> SignonCredentials:
+        """Load credentials and enforce at least one usable auth mode."""
         creds = load_signon_credentials(
             username=self.username,
             password=self.password,
@@ -1327,6 +1419,7 @@ class NanoHUBSubmitClient:
     def _probe_server(
         self, *, cfg: SubmitClientConfig, creds: SignonCredentials
     ) -> dict[str, Any]:
+        """Open lightweight probe session to validate auth/capabilities."""
         conn = SubmitWireConnection(
             listen_uris=cfg.listen_uris,
             submit_ssl_ca=cfg.submit_ssl_ca,
@@ -1421,6 +1514,11 @@ class NanoHUBSubmitClient:
     def _run_local_submit(
         self, request: SubmitRequest, *, operation_timeout: float | None = None
     ) -> CommandResult:
+        """Execute local requests directly, including parameter sweeps.
+
+        This path emulates submit's local behavior with optional progress
+        rendering and run directory artifact generation.
+        """
         parameter_combinations = _expand_local_parameter_sweep(request)
         effective_timeout = (
             self.operation_timeout if operation_timeout is None else operation_timeout
@@ -1654,6 +1752,7 @@ class NanoHUBSubmitClient:
         local_execution: bool,
         operation_timeout: float | None = None,
     ) -> CommandResult:
+        """Execute one full wire-protocol submit action and collect result."""
         effective_timeout = (
             self.operation_timeout if operation_timeout is None else operation_timeout
         )
@@ -1774,6 +1873,11 @@ class NanoHUBSubmitClient:
         client_id_hex: str,
         args: list[str],
     ) -> str:
+        """Send mandatory client execution context frames to the server.
+
+        Returns a temporary signature file path that must be cleaned up by the
+        caller once the session ends.
+        """
         work_directory = os.getcwd()
         mount_device = _discover_mount_device(work_directory)
         work_directory_properties = _file_properties(work_directory, mount_device)
@@ -1832,10 +1936,12 @@ class NanoHUBSubmitClient:
         creds: SignonCredentials,
         message: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        """Process one server frame and return any immediate client responses."""
         message_type = message.get("messageType")
         if not isinstance(message_type, str):
             return []
 
+        # Session metadata frames.
         if message_type == "serverId":
             server_id = message.get("serverId")
             if isinstance(server_id, str):
@@ -1851,6 +1957,7 @@ class NanoHUBSubmitClient:
                 state.server_version = version_value
             return []
 
+        # Stream forwarding frames.
         if message_type == "writeStdout":
             text = message.get("text")
             if isinstance(text, str):
@@ -1872,6 +1979,7 @@ class NanoHUBSubmitClient:
                     state.stderr_chunks.append(text + "\n")
             return []
 
+        # Job identity frames.
         if message_type == "jobId":
             job_id = message.get("jobId")
             if isinstance(job_id, int):
@@ -1887,6 +1995,7 @@ class NanoHUBSubmitClient:
                 state.job_id = job_id
             return []
 
+        # Authentication handshake.
         if message_type == "serverReadyForSignon":
             signon_message: dict[str, Any] = {"messageType": "signon"}
             encrypted_message = message.get("encryptedMessage")
@@ -1911,6 +2020,7 @@ class NanoHUBSubmitClient:
             state.authenticated = True
             return [{"messageType": "submitCommandFileInodesSent"}]
 
+        # Execution setup pipeline.
         if message_type in {"noExportCommandFiles", "exportCommandFilesComplete"}:
             return [{"messageType": "parseArguments"}]
 
@@ -1925,6 +2035,7 @@ class NanoHUBSubmitClient:
         if message_type in {"noExportFiles", "exportFilesComplete"}:
             return [{"messageType": "startRemote"}]
 
+        # Runtime I/O and lifecycle transitions.
         if message_type == "serverReadyForIO":
             return [{"messageType": "serverReadyForIO"}]
 
@@ -1952,6 +2063,7 @@ class NanoHUBSubmitClient:
                 return [{"messageType": "importFileReady", "file": import_file}]
             return []
 
+        # Terminal frames.
         if message_type in {"serverExit", "exit"}:
             exit_code = message.get("exitCode")
             if not isinstance(exit_code, int):

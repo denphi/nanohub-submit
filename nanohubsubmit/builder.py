@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Argument builders for translating typed requests to submit CLI flags."""
+
 from collections.abc import Iterable, Sequence
 import re
 
@@ -7,11 +9,13 @@ from .models import SubmitRequest
 
 
 def _append_many(args: list[str], option: str, values: Iterable[str]) -> None:
+    """Append a repeatable option for each value in order."""
     for value in values:
         args.extend([option, value])
 
 
 def _append_int(args: list[str], option: str, value: int | None) -> None:
+    """Append an integer option if provided, validating non-negative values."""
     if value is None:
         return
     if value < 0:
@@ -23,6 +27,7 @@ _WALL_TIME_HHMMSS = re.compile(r"^\d+:\d{2}:\d{2}$")
 
 
 def _append_wall_time(args: list[str], value: int | str | None) -> None:
+    """Append --wallTime supporting minutes or HH:MM:SS legacy format."""
     if value is None:
         return
 
@@ -50,6 +55,7 @@ def _append_wall_time(args: list[str], value: int | str | None) -> None:
 
 
 def _append_separator(args: list[str], value: str | None) -> None:
+    """Append parameter separator option used by sweep value splitting."""
     if value is None:
         return
     separator = str(value)
@@ -63,6 +69,7 @@ class CommandBuilder:
 
     @staticmethod
     def build_submit_args(request: SubmitRequest) -> list[str]:
+        """Build a submit command argument vector from a SubmitRequest."""
         args: list[str] = []
 
         if request.local and request.asynchronous:
@@ -133,6 +140,7 @@ class CommandBuilder:
 
     @staticmethod
     def build_status_args(job_ids: Sequence[int]) -> list[str]:
+        """Build repeated --status arguments for one or more remote job IDs."""
         if not job_ids:
             raise ValueError("job_ids cannot be empty")
         args: list[str] = []
@@ -144,6 +152,7 @@ class CommandBuilder:
 
     @staticmethod
     def build_kill_args(job_ids: Sequence[int]) -> list[str]:
+        """Build repeated --kill arguments for one or more remote job IDs."""
         if not job_ids:
             raise ValueError("job_ids cannot be empty")
         args: list[str] = []
@@ -155,6 +164,7 @@ class CommandBuilder:
 
     @staticmethod
     def build_venue_status_args(venues: Sequence[str] | None = None) -> list[str]:
+        """Build a --venueStatus request with optional venue filters."""
         args = ["--venueStatus"]
         if venues:
             args.extend(venues)

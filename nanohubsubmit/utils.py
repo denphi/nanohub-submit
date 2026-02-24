@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Utility helpers for submit metadata discovery and parsing.
+
+These functions provide high-level catalog/exploration primitives built on top
+of `NanoHUBSubmitClient.raw(...)` responses.
+"""
+
 import json
 import re
 from dataclasses import dataclass, field
@@ -44,6 +50,7 @@ _CATALOG_DETAILS = ("tools", "venues", "managers")
 
 
 def _dedupe_keep_order(values: Iterable[str]) -> List[str]:
+    """Deduplicate while preserving original item order."""
     seen = set()
     ordered = []
     for value in values:
@@ -54,12 +61,14 @@ def _dedupe_keep_order(values: Iterable[str]) -> List[str]:
 
 
 def _combined_text(stdout: str, stderr: str) -> str:
+    """Combine stdout/stderr streams into a single parse target."""
     if stdout and stderr:
         return stdout.rstrip("\n") + "\n" + stderr
     return stdout or stderr or ""
 
 
 def _maybe_parse_json_items(text: str, detail: str) -> List[str]:
+    """Parse list payloads when server/help output is JSON formatted."""
     text = text.strip()
     if not text:
         return []
@@ -141,6 +150,7 @@ def _filter_names(
     use_regex: bool = False,
     limit: int | None = None,
 ) -> List[str]:
+    """Filter names using substring/exact/regex matching semantics."""
     if limit is not None and limit < 0:
         raise ValueError("limit cannot be negative")
     query = query or ""
@@ -172,6 +182,7 @@ def _filter_names(
 
 
 def _normalize_details(details: Iterable[str] | None) -> List[str]:
+    """Normalize and validate requested catalog detail groups."""
     if details is None:
         return list(_CATALOG_DETAILS)
 
@@ -240,29 +251,35 @@ def load_available_list(
 def load_available_tools(
     client: NanoHUBSubmitClient, operation_timeout: float = 60.0
 ) -> List[str]:
+    """Load available tool names from submit server help output."""
     return load_available_list(client, "tools", operation_timeout=operation_timeout)
 
 
 def load_available_venues(
     client: NanoHUBSubmitClient, operation_timeout: float = 60.0
 ) -> List[str]:
+    """Load available venue names from submit server help output."""
     return load_available_list(client, "venues", operation_timeout=operation_timeout)
 
 
 def load_available_managers(
     client: NanoHUBSubmitClient, operation_timeout: float = 60.0
 ) -> List[str]:
+    """Load available manager names from submit server help output."""
     return load_available_list(client, "managers", operation_timeout=operation_timeout)
 
 
 @dataclass
 class SubmitCatalog:
+    """Structured server catalog containing tools, venues, and managers."""
+
     tools: List[str] = field(default_factory=list)
     venues: List[str] = field(default_factory=list)
     managers: List[str] = field(default_factory=list)
     raw_help: Dict[str, str] = field(default_factory=dict)
 
     def entries(self, detail: str) -> List[str]:
+        """Return entries for one detail group (`tools|venues|managers`)."""
         lowered = detail.strip().lower()
         if lowered == "tools":
             return list(self.tools)
@@ -275,6 +292,7 @@ class SubmitCatalog:
     def contains(
         self, detail: str, name: str, *, case_sensitive: bool = False
     ) -> bool:
+        """Check whether a name exists in the selected detail group."""
         values = self.entries(detail)
         if case_sensitive:
             return name in values
@@ -291,6 +309,7 @@ class SubmitCatalog:
         use_regex: bool = False,
         limit: int | None = None,
     ) -> Dict[str, List[str]]:
+        """Filter names across one or more detail groups."""
         selected = _normalize_details(details)
         return {
             detail: _filter_names(
@@ -305,6 +324,7 @@ class SubmitCatalog:
         }
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize catalog and raw help payloads to plain dictionaries."""
         return {
             "tools": list(self.tools),
             "venues": list(self.venues),
@@ -318,6 +338,7 @@ def load_available_catalog(
     include_raw_help: bool = False,
     operation_timeout: float = 60.0,
 ) -> SubmitCatalog:
+    """Load tools, venues, and managers in one request sequence."""
     raw_help: Dict[str, str] = {}
 
     def _load(detail: str) -> List[str]:
@@ -349,6 +370,7 @@ def filter_catalog(
     use_regex: bool = False,
     limit: int | None = None,
 ) -> Dict[str, List[str]]:
+    """Filter an already loaded `SubmitCatalog` by query."""
     return catalog.filter(
         query,
         details=details,
@@ -370,6 +392,7 @@ def find_catalog_entries(
     limit: int | None = 25,
     operation_timeout: float = 60.0,
 ) -> Dict[str, List[str]]:
+    """Load (or reuse cached) catalog and return filtered matches."""
     get_catalog = getattr(client, "get_catalog", None)
     if callable(get_catalog):
         catalog = get_catalog(operation_timeout=operation_timeout)
@@ -388,12 +411,15 @@ def find_catalog_entries(
 
 @dataclass
 class SubmitServerExploration:
+    """Composite introspection payload returned by `explore_submit_server`."""
+
     doctor: Dict[str, Any]
     catalog: SubmitCatalog
     venue_status_raw: str
     venue_status: List[Dict[str, str]]
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize exploration payload to JSON-friendly structures."""
         return {
             "doctor": dict(self.doctor),
             "catalog": self.catalog.to_dict(),
