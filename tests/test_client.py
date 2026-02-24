@@ -375,7 +375,13 @@ def test_client_raw_help_uses_command_file_handshake(monkeypatch: pytest.MonkeyP
                             self.conn,
                             {"messageType": "writeStdout", "text": "tools:\n  abacus\n"},
                         )
-                        _send_json(self.conn, {"messageType": "exit", "exitCode": 0})
+                        _send_json(
+                            self.conn, {"messageType": "childHasExited", "childHasExited": True}
+                        )
+                    elif message_type == "clientReadyForIO":
+                        _send_json(self.conn, {"messageType": "noImportFile"})
+                    elif message_type == "importFilesComplete":
+                        _send_json(self.conn, {"messageType": "serverExit", "exitCode": 0})
                         return
             except Exception as exc:  # pragma: no cover - test helper diagnostics
                 self.error = exc
@@ -395,3 +401,5 @@ def test_client_raw_help_uses_command_file_handshake(monkeypatch: pytest.MonkeyP
     assert "parseArguments" in server.received_message_types
     assert "setupRemote" in server.received_message_types
     assert "startRemote" in server.received_message_types
+    assert "clientReadyForIO" in server.received_message_types
+    assert "importFilesComplete" in server.received_message_types

@@ -1330,6 +1330,21 @@ class NanoHUBSubmitClient:
         if message_type == "wait":
             return [{"messageType": "exit"}]
 
+        if message_type == "childHasExited":
+            return [{"messageType": "clientReadyForIO"}]
+
+        if message_type == "noImportFile":
+            return [{"messageType": "importFilesComplete"}]
+
+        if message_type == "importFileFailed":
+            return [{"messageType": "importFilesComplete"}]
+
+        if message_type == "importFile":
+            import_file = message.get("file")
+            if isinstance(import_file, str) and import_file:
+                return [{"messageType": "importFileReady", "file": import_file}]
+            return []
+
         if message_type in {"serverExit", "exit"}:
             exit_code = message.get("exitCode")
             if not isinstance(exit_code, int):
