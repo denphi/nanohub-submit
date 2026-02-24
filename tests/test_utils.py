@@ -100,7 +100,7 @@ def test_load_available_catalog_queries_all_lists() -> None:
         ["--help", "venues"],
         ["--help", "managers"],
     ]
-    assert client.raw_operation_timeouts == [20.0, 20.0, 20.0]
+    assert client.raw_operation_timeouts == [60.0, 60.0, 60.0]
 
 
 def test_explore_submit_server_collects_doctor_catalog_and_venue_status() -> None:
@@ -116,5 +116,5 @@ def test_explore_submit_server_collects_doctor_catalog_and_venue_status() -> Non
         {"venue": "community", "status": "down"},
     ]
     assert client.doctor_calls == [True]
-    assert client.raw_operation_timeouts == [20.0, 20.0, 20.0]
-    assert client.venue_status_operation_timeouts == [20.0]
+    assert client.raw_operation_timeouts == [60.0, 60.0, 60.0]
+    assert client.venue_status_operation_timeouts == [60.0]

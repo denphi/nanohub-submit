@@ -152,7 +152,7 @@ def parse_venue_status(text: str) -> List[Dict[str, str]]:
 
 
 def load_available_list(
-    client: NanoHUBSubmitClient, detail: str, operation_timeout: float = 20.0
+    client: NanoHUBSubmitClient, detail: str, operation_timeout: float = 60.0
 ) -> List[str]:
     """
     Query submit server for one list detail: tools, venues, or managers.
@@ -175,19 +175,19 @@ def load_available_list(
 
 
 def load_available_tools(
-    client: NanoHUBSubmitClient, operation_timeout: float = 20.0
+    client: NanoHUBSubmitClient, operation_timeout: float = 60.0
 ) -> List[str]:
     return load_available_list(client, "tools", operation_timeout=operation_timeout)
 
 
 def load_available_venues(
-    client: NanoHUBSubmitClient, operation_timeout: float = 20.0
+    client: NanoHUBSubmitClient, operation_timeout: float = 60.0
 ) -> List[str]:
     return load_available_list(client, "venues", operation_timeout=operation_timeout)
 
 
 def load_available_managers(
-    client: NanoHUBSubmitClient, operation_timeout: float = 20.0
+    client: NanoHUBSubmitClient, operation_timeout: float = 60.0
 ) -> List[str]:
     return load_available_list(client, "managers", operation_timeout=operation_timeout)
 
@@ -211,7 +211,7 @@ class SubmitCatalog:
 def load_available_catalog(
     client: NanoHUBSubmitClient,
     include_raw_help: bool = False,
-    operation_timeout: float = 20.0,
+    operation_timeout: float = 60.0,
 ) -> SubmitCatalog:
     raw_help: Dict[str, str] = {}
 
@@ -255,7 +255,7 @@ def explore_submit_server(
     *,
     include_raw_help: bool = False,
     include_venue_status: bool = True,
-    operation_timeout: float = 20.0,
+    operation_timeout: float = 60.0,
 ) -> SubmitServerExploration:
     """
     Collect as much introspection data as possible from submit server.

@@ -113,6 +113,8 @@ class _FakeSubmitServer(threading.Thread):
                         "hasVenueProbe": True,
                     },
                 )
+            elif message_type == "submitCommandFileInodesSent":
+                _send_json(conn, {"messageType": "noExportCommandFiles"})
             elif message_type == "parseArguments":
                 _send_json(conn, {"messageType": "writeStdout", "text": "STATUS OK\n"})
                 _send_json(conn, {"messageType": "exit", "exitCode": 0})
@@ -199,6 +201,8 @@ class _FakeSubmitServer(threading.Thread):
                             "hasVenueProbe": True,
                         },
                     )
+                elif message_type == "submitCommandFileInodesSent":
+                    _send_json(conn, {"messageType": "noExportCommandFiles"})
                 elif message_type == "parseArguments":
                     # Keep the session open and never emit exit to trigger client timeout.
                     continue
@@ -297,3 +301,75 @@ def test_client_raw_operation_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
         client.raw(["--help", "tools"], operation_timeout=0.25)
 
     _assert_server_ok(server)
+
+
+def test_client_raw_help_uses_command_file_handshake(monkeypatch: pytest.MonkeyPatch) -> None:
+    client_conn, server_conn = socket.socketpair()
+    _patch_connection(monkeypatch, client_conn)
+
+    class _RawHelpServer(_FakeSubmitServer):
+        def _run_status(self, conn: socket.socket) -> None:  # pragma: no cover - not used
+            raise NotImplementedError
+
+        def run(self) -> None:  # noqa: D401 - helper override
+            try:
+                self.conn.settimeout(5.0)
+                handshake = b""
+                while len(handshake) < 32:
+                    chunk = self.conn.recv(32 - len(handshake))
+                    if not chunk:
+                        raise EOFError("missing handshake from client")
+                    handshake += chunk
+                self.conn.sendall("SUBMIT 1024".ljust(32).encode("utf-8"))
+
+                _send_json(
+                    self.conn, {"messageType": "serverId", "serverId": str(uuid.uuid4())}
+                )
+                _send_json(self.conn, {"messageType": "serverVersion", "version": "1.0.0"})
+
+                buffer = b""
+                while True:
+                    message, buffer = _recv_json(self.conn, buffer)
+                    message_type = str(message.get("messageType", ""))
+                    self.received_message_types.append(message_type)
+                    if message_type == "clientReadyForSignon":
+                        _send_json(self.conn, {"messageType": "serverReadyForSignon"})
+                    elif message_type == "signon":
+                        _send_json(
+                            self.conn,
+                            {
+                                "messageType": "authz",
+                                "success": True,
+                                "retry": False,
+                                "hasDistributor": True,
+                                "hasHarvester": True,
+                                "hasJobStatus": True,
+                                "hasJobKill": True,
+                                "hasVenueProbe": True,
+                            },
+                        )
+                    elif message_type == "submitCommandFileInodesSent":
+                        _send_json(self.conn, {"messageType": "noExportCommandFiles"})
+                    elif message_type == "parseArguments":
+                        _send_json(
+                            self.conn,
+                            {"messageType": "writeStdout", "text": "tools:\n  abacus\n"},
+                        )
+                        _send_json(self.conn, {"messageType": "exit", "exitCode": 0})
+                        return
+            except Exception as exc:  # pragma: no cover - test helper diagnostics
+                self.error = exc
+            finally:
+                self.conn.close()
+
+    server = _RawHelpServer("status", server_conn)
+    server.start()
+
+    client = _make_client()
+    result = client.raw(["--help", "tools"], operation_timeout=2.0)
+
+    _assert_server_ok(server)
+    assert result.returncode == 0
+    assert "abacus" in result.stdout
+    assert "submitCommandFileInodesSent" in server.received_message_types
+    assert "parseArguments" in server.received_message_types

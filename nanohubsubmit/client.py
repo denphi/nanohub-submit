@@ -1302,14 +1302,10 @@ class NanoHUBSubmitClient:
             if not success:
                 raise AuthenticationError("session authentication failed")
             state.authenticated = True
-            if state.action == "submit":
-                return [{"messageType": "submitCommandFileInodesSent"}]
-            return [{"messageType": "parseArguments"}]
+            return [{"messageType": "submitCommandFileInodesSent"}]
 
         if message_type in {"noExportCommandFiles", "exportCommandFilesComplete"}:
-            if state.action == "submit":
-                return [{"messageType": "parseArguments"}]
-            return []
+            return [{"messageType": "parseArguments"}]
 
         if message_type == "argumentsParsed":
             if state.action == "submit":

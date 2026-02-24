@@ -61,14 +61,14 @@ client = NanoHUBSubmitClient(
     verbose=True,
 )
 
-catalog = load_available_catalog(client, operation_timeout=20.0)
+catalog = load_available_catalog(client, operation_timeout=60.0)
 print(catalog.tools)
 print(catalog.venues)
 print(catalog.managers)
 
-exploration = explore_submit_server(client, operation_timeout=20.0).to_dict()
+exploration = explore_submit_server(client, operation_timeout=60.0).to_dict()
 print(exploration["doctor"])
 ```
 
 `operation_timeout` prevents metadata discovery calls from hanging forever if the
-submit server does not emit an exit frame.
+submit server does not emit an exit frame (default is 60 seconds).
