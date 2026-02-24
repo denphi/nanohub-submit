@@ -166,6 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--asynchronous", action="store_true")
     submit.add_argument("--venue", action="append", default=[])
     submit.add_argument("--input-file", action="append", default=[])
+    submit.add_argument("--separator")
     submit.add_argument("--parameter", action="append", default=[])
     submit.add_argument("--data-file")
     submit.add_argument("--n-cpus", type=int)
@@ -303,6 +304,7 @@ def main(argv: list[str] | None = None) -> int:
                 asynchronous=ns.asynchronous,
                 venues=ns.venue,
                 input_files=ns.input_file,
+                separator=ns.separator,
                 parameters=ns.parameter,
                 data_file=ns.data_file,
                 n_cpus=ns.n_cpus,

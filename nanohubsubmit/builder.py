@@ -49,6 +49,15 @@ def _append_wall_time(args: list[str], value: int | str | None) -> None:
     raise ValueError("--wallTime must be minutes or hh:mm:ss")
 
 
+def _append_separator(args: list[str], value: str | None) -> None:
+    if value is None:
+        return
+    separator = str(value)
+    if not separator:
+        raise ValueError("--separator cannot be empty")
+    args.extend(["--separator", separator])
+
+
 class CommandBuilder:
     """Converts typed request data to submit CLI arguments."""
 
@@ -68,6 +77,7 @@ class CommandBuilder:
 
         _append_many(args, "--venue", request.venues)
         _append_many(args, "--inputfile", request.input_files)
+        _append_separator(args, request.separator)
         _append_many(args, "--parameters", request.parameters)
 
         if request.data_file:

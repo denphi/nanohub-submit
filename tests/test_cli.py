@@ -31,3 +31,21 @@ def test_all_subcommands_accept_verbose() -> None:
     for argv in command_vectors:
         ns = parser.parse_args(argv)
         assert ns.verbose is True
+
+
+def test_submit_parser_accepts_separator() -> None:
+    parser = build_parser()
+    ns = parser.parse_args(
+        [
+            "submit",
+            "--separator",
+            ",",
+            "--parameter",
+            "@@name=hub1,hub2",
+            "--",
+            "echo",
+            "@@name",
+        ]
+    )
+    assert ns.separator == ","
+    assert ns.parameter == ["@@name=hub1,hub2"]

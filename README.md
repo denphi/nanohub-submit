@@ -75,6 +75,29 @@ print(result.returncode)
 print(result.stdout)
 ```
 
+Equivalent to:
+`submit --local --runName=echotest --progress submit -s, -p @@name=hub1,hub2,hub3 echo @@name`
+
+```python
+from nanohubsubmit import NanoHUBSubmitClient, ProgressMode, SubmitRequest
+
+client = NanoHUBSubmitClient(verbose=True, local_fast_path=False)
+result = client.submit(
+    SubmitRequest(
+        command="echo",
+        command_arguments=["@@name"],
+        local=True,
+        run_name="echotest",
+        separator=",",
+        parameters=["@@name=hub1,hub2,hub3"],
+        progress=ProgressMode.SUBMIT,
+    ),
+    operation_timeout=180.0,
+)
+print(result.returncode)
+print(result.stdout)
+```
+
 ## Metadata utilities
 
 ```python

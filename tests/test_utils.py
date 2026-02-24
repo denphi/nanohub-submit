@@ -84,6 +84,15 @@ options:
     assert parse_help_items(text) == ["abacus", "gem5"]
 
 
+def test_parse_help_items_ignores_protocol_noise() -> None:
+    text = """
+Currently available TOOLs are:
+  abinit-10.2.7
+Congratulations - you have successfully authenticated.
+"""
+    assert parse_help_items(text) == ["abinit-10.2.7"]
+
+
 def test_parse_venue_status_extracts_key_values() -> None:
     text = "venue=workspace status=up\nvenue=community status=down\n"
     assert parse_venue_status(text) == [

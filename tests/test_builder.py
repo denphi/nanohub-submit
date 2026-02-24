@@ -12,6 +12,7 @@ def test_build_submit_args_full() -> None:
         asynchronous=True,
         venues=["workspace", "community"],
         input_files=["input.dat"],
+        separator=",",
         parameters=["alpha=1", "beta=2"],
         data_file="data.csv",
         n_cpus=8,
@@ -46,6 +47,8 @@ def test_build_submit_args_full() -> None:
         "community",
         "--inputfile",
         "input.dat",
+        "--separator",
+        ",",
         "--parameters",
         "alpha=1",
         "--parameters",
@@ -128,4 +131,14 @@ def test_build_submit_args_supports_wall_time_hhmmss() -> None:
 def test_build_submit_args_rejects_invalid_wall_time_format() -> None:
     request = SubmitRequest(command="echo", command_arguments=["hello"], wall_time="1h")
     with pytest.raises(ValueError, match="--wallTime must be minutes or hh:mm:ss"):
+        CommandBuilder.build_submit_args(request)
+
+
+def test_build_submit_args_rejects_empty_separator() -> None:
+    request = SubmitRequest(
+        command="echo",
+        command_arguments=["hello"],
+        separator="",
+    )
+    with pytest.raises(ValueError, match="--separator cannot be empty"):
         CommandBuilder.build_submit_args(request)

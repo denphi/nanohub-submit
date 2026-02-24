@@ -34,6 +34,11 @@ _LINE_STOPWORDS = {
     "submit",
 }
 
+_PROTOCOL_NOISE_SUBSTRINGS = (
+    "successfully authenticated",
+    "authentication failed",
+)
+
 
 _CATALOG_DETAILS = ("tools", "venues", "managers")
 
@@ -97,6 +102,8 @@ def parse_help_items(text: str) -> List[str]:
         if lower.startswith("positional arguments:"):
             continue
         if lower.startswith("optional arguments:"):
+            continue
+        if any(noise in lower for noise in _PROTOCOL_NOISE_SUBSTRINGS):
             continue
         if _SECTION_LINE_RE.match(stripped):
             continue

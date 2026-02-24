@@ -30,6 +30,7 @@ class SubmitRequest:
     venues: list[str] = field(default_factory=list)
     input_files: list[str] = field(default_factory=list)
     parameters: list[str] = field(default_factory=list)
+    separator: str | None = None
     data_file: str | None = None
 
     n_cpus: int | None = None
