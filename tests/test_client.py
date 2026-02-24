@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 import threading
 import uuid
 
@@ -428,3 +429,33 @@ def test_client_raw_help_uses_command_file_handshake(monkeypatch: pytest.MonkeyP
     assert "startRemote" in server.received_message_types
     assert "clientReadyForIO" in server.received_message_types
     assert "importFilesComplete" in server.received_message_types
+
+
+def test_client_submit_local_fast_path_runs_immediately() -> None:
+    client = _make_client()
+    result = client.submit(
+        SubmitRequest(
+            command=sys.executable,
+            command_arguments=["-c", "print('local-fast-path-ok')"],
+            local=True,
+        ),
+        operation_timeout=5.0,
+    )
+    assert result.returncode == 0
+    assert "local-fast-path-ok" in result.stdout
+    assert result.authenticated is False
+
+
+def test_client_submit_local_fast_path_timeout() -> None:
+    client = _make_client()
+    with pytest.raises(
+        CommandExecutionError, match="timed out waiting for local command"
+    ):
+        client.submit(
+            SubmitRequest(
+                command=sys.executable,
+                command_arguments=["-c", "import time; time.sleep(5)"],
+                local=True,
+            ),
+            operation_timeout=0.1,
+        )

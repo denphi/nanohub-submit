@@ -397,6 +397,7 @@ class NanoHUBSubmitClient:
         verbose: bool = False,
         operation_timeout: float | None = None,
         verbose_stream: TextIO | None = None,
+        local_fast_path: bool = True,
     ) -> None:
         self.config_path = config_path
         self.listen_uris_override = listen_uris
@@ -418,6 +419,7 @@ class NanoHUBSubmitClient:
         self.verbose = verbose
         self.operation_timeout = operation_timeout
         self.verbose_stream = verbose_stream
+        self.local_fast_path = local_fast_path
         self.client_version = _resolve_client_version()
 
     def _verbose_log(self, message: str) -> None:
@@ -457,6 +459,8 @@ class NanoHUBSubmitClient:
     def submit(
         self, request: SubmitRequest, *, operation_timeout: float | None = None
     ) -> CommandResult:
+        if request.local and self.local_fast_path:
+            return self._run_local_submit(request, operation_timeout=operation_timeout)
         args = CommandBuilder.build_submit_args(request)
         return self._run(
             action="submit",
@@ -1047,6 +1051,66 @@ class NanoHUBSubmitClient:
                     pass
 
         raise CommandExecutionError("server probe timed out waiting for authz")
+
+    def _run_local_submit(
+        self, request: SubmitRequest, *, operation_timeout: float | None = None
+    ) -> CommandResult:
+        command = [request.command, *list(request.command_arguments)]
+        effective_timeout = (
+            self.operation_timeout if operation_timeout is None else operation_timeout
+        )
+        if effective_timeout is not None and effective_timeout <= 0:
+            raise ValueError("operation_timeout must be positive when provided")
+
+        env = os.environ.copy()
+        for key, value in request.environment.items():
+            if value is None:
+                continue
+            env[str(key)] = str(value)
+
+        self._verbose_log(
+            "starting local-fast-path command=%s"
+            % (" ".join(command) if command else "<none>")
+        )
+        try:
+            completed = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=effective_timeout,
+                env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            timeout = effective_timeout if effective_timeout is not None else 0.0
+            raise CommandExecutionError(
+                "timed out waiting for local command after %.1fs" % timeout
+            ) from exc
+        except OSError as exc:
+            raise CommandExecutionError(str(exc)) from exc
+
+        result = CommandResult(
+            args=["submit", "--local", *command],
+            returncode=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            authenticated=False,
+            server_disconnected=False,
+            server_messages=[],
+            job_id=None,
+            run_name=request.run_name,
+            server_version=None,
+        )
+        self._verbose_log(
+            "finished local-fast-path returncode=%d" % result.returncode
+        )
+        if self.check and not result.ok:
+            raise CommandExecutionError(
+                "local command exited with code %d: %s"
+                % (result.returncode, result.stderr.strip())
+            )
+        return result
 
     def _run(
         self,

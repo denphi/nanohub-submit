@@ -99,6 +99,10 @@ submit server does not emit an exit frame (default is 60 seconds).
 `NanoHUBSubmitClient` uses `/etc/submit/submit-client.conf` by default. Pass
 `config_path=...` only when you need a non-default config file.
 
+Local submissions (`SubmitRequest(..., local=True)`) use a direct fast path by
+default for immediate execution. Set `local_fast_path=False` when creating the
+client to force local mode through the submit server protocol.
+
 ## Jupyter Tutorial
 
 Open and run:
