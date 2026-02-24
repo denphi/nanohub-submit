@@ -21,7 +21,7 @@ python3 -m pip install -e .
 ## CLI examples
 
 ```bash
-nanohub-submit submit --verbose --config /etc/submit/submit-client.conf --venue workspace -- python3 run.py
+nanohub-submit submit --verbose --venue workspace -- python3 run.py
 nanohub-submit status --verbose 12345 12346
 nanohub-submit kill --verbose 12345
 nanohub-submit venue-status --verbose
@@ -35,7 +35,6 @@ nanohub-submit explore --verbose --format json
 from nanohubsubmit import NanoHUBSubmitClient, SubmitRequest
 
 client = NanoHUBSubmitClient(
-    config_path="/etc/submit/submit-client.conf",
     verbose=True,
 )
 request = SubmitRequest(
@@ -57,7 +56,6 @@ from nanohubsubmit import NanoHUBSubmitClient
 from nanohubsubmit.utils import load_available_catalog, explore_submit_server
 
 client = NanoHUBSubmitClient(
-    config_path="/etc/submit/submit-client.conf",
     verbose=True,
 )
 
@@ -72,3 +70,6 @@ print(exploration["doctor"])
 
 `operation_timeout` prevents metadata discovery calls from hanging forever if the
 submit server does not emit an exit frame (default is 60 seconds).
+
+`NanoHUBSubmitClient` uses `/etc/submit/submit-client.conf` by default. Pass
+`config_path=...` only when you need a non-default config file.
