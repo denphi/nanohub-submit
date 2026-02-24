@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nanohubsubmit"
+dynamic = ["version"]
+description = "Modern standalone NanoHUB submit client."
+readme = "README.md"
+requires-python = ">=3.7"
+authors = [
+  { name = "NanoHUB Submit Team" }
+]
+keywords = ["nanohub", "submit", "client", "workflow"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.7",
+  "Programming Language :: Python :: 3 :: Only",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "importlib-metadata>=4.0; python_version < '3.8'",
+]
+
+[project.urls]
+Repository = "https://github.com/nanohub/submit"
+
+[project.scripts]
+nanohub-submit = "nanohubsubmit.cli:main"
+
+[tool.setuptools.dynamic]
+version = {file = "VERSION"}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nanohubsubmit*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
