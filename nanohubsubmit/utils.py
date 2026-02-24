@@ -151,14 +151,16 @@ def parse_venue_status(text: str) -> List[Dict[str, str]]:
     return entries
 
 
-def load_available_list(client: NanoHUBSubmitClient, detail: str) -> List[str]:
+def load_available_list(
+    client: NanoHUBSubmitClient, detail: str, operation_timeout: float = 20.0
+) -> List[str]:
     """
     Query submit server for one list detail: tools, venues, or managers.
     """
     if detail not in _LIST_DETAIL_TO_ARGS:
         raise ValueError("detail must be one of: tools, venues, managers")
 
-    result = client.raw(_LIST_DETAIL_TO_ARGS[detail])
+    result = client.raw(_LIST_DETAIL_TO_ARGS[detail], operation_timeout=operation_timeout)
     text = _combined_text(result.stdout, result.stderr)
     if result.returncode != 0 and not text.strip():
         raise CommandExecutionError(
@@ -172,16 +174,22 @@ def load_available_list(client: NanoHUBSubmitClient, detail: str) -> List[str]:
     return parse_help_items(text)
 
 
-def load_available_tools(client: NanoHUBSubmitClient) -> List[str]:
-    return load_available_list(client, "tools")
+def load_available_tools(
+    client: NanoHUBSubmitClient, operation_timeout: float = 20.0
+) -> List[str]:
+    return load_available_list(client, "tools", operation_timeout=operation_timeout)
 
 
-def load_available_venues(client: NanoHUBSubmitClient) -> List[str]:
-    return load_available_list(client, "venues")
+def load_available_venues(
+    client: NanoHUBSubmitClient, operation_timeout: float = 20.0
+) -> List[str]:
+    return load_available_list(client, "venues", operation_timeout=operation_timeout)
 
 
-def load_available_managers(client: NanoHUBSubmitClient) -> List[str]:
-    return load_available_list(client, "managers")
+def load_available_managers(
+    client: NanoHUBSubmitClient, operation_timeout: float = 20.0
+) -> List[str]:
+    return load_available_list(client, "managers", operation_timeout=operation_timeout)
 
 
 @dataclass
@@ -201,13 +209,15 @@ class SubmitCatalog:
 
 
 def load_available_catalog(
-    client: NanoHUBSubmitClient, include_raw_help: bool = False
+    client: NanoHUBSubmitClient,
+    include_raw_help: bool = False,
+    operation_timeout: float = 20.0,
 ) -> SubmitCatalog:
     raw_help: Dict[str, str] = {}
 
     def _load(detail: str) -> List[str]:
         args = _LIST_DETAIL_TO_ARGS[detail]
-        result = client.raw(args)
+        result = client.raw(args, operation_timeout=operation_timeout)
         text = _combined_text(result.stdout, result.stderr)
         if include_raw_help:
             raw_help[detail] = text
@@ -245,17 +255,22 @@ def explore_submit_server(
     *,
     include_raw_help: bool = False,
     include_venue_status: bool = True,
+    operation_timeout: float = 20.0,
 ) -> SubmitServerExploration:
     """
     Collect as much introspection data as possible from submit server.
     """
     doctor_report = client.doctor(probe_server=True).to_dict()
-    catalog = load_available_catalog(client, include_raw_help=include_raw_help)
+    catalog = load_available_catalog(
+        client,
+        include_raw_help=include_raw_help,
+        operation_timeout=operation_timeout,
+    )
 
     venue_status_raw = ""
     venue_status: List[Dict[str, str]] = []
     if include_venue_status:
-        venue_result = client.venue_status()
+        venue_result = client.venue_status(operation_timeout=operation_timeout)
         venue_status_raw = _combined_text(venue_result.stdout, venue_result.stderr)
         venue_status = parse_venue_status(venue_status_raw)
 

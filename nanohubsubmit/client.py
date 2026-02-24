@@ -12,7 +12,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 try:
     from importlib.metadata import PackageNotFoundError, version as package_version
@@ -380,6 +380,9 @@ class NanoHUBSubmitClient:
         idle_timeout: float = 1.0,
         keepalive_interval: float = 15.0,
         check: bool = False,
+        verbose: bool = False,
+        operation_timeout: float | None = None,
+        verbose_stream: TextIO | None = None,
     ) -> None:
         self.config_path = config_path
         self.listen_uris_override = listen_uris
@@ -398,28 +401,103 @@ class NanoHUBSubmitClient:
         self.idle_timeout = idle_timeout
         self.keepalive_interval = keepalive_interval
         self.check = check
+        self.verbose = verbose
+        self.operation_timeout = operation_timeout
+        self.verbose_stream = verbose_stream
         self.client_version = _resolve_client_version()
 
-    def submit(self, request: SubmitRequest) -> CommandResult:
+    def _verbose_log(self, message: str) -> None:
+        if not self.verbose:
+            return
+        stream = self.verbose_stream if self.verbose_stream is not None else sys.stderr
+        try:
+            stream.write(f"[nanohubsubmit] {message}\n")
+            stream.flush()
+        except Exception:
+            pass
+
+    def _trace_message(self, direction: str, message: dict[str, Any]) -> None:
+        if not self.verbose:
+            return
+
+        message_type = message.get("messageType")
+        if not isinstance(message_type, str):
+            message_type = "<unknown>"
+        details: list[str] = []
+        for key in ("success", "jobId", "runName", "version", "exitCode"):
+            if key in message:
+                details.append(f"{key}={message[key]}")
+
+        text = message.get("text")
+        if isinstance(text, str):
+            text_preview = text.replace("\n", "\\n")
+            if len(text_preview) > 96:
+                text_preview = text_preview[:93] + "..."
+            details.append(f"text={text_preview!r}")
+
+        summary = f"{direction} {message_type}"
+        if details:
+            summary += " (" + ", ".join(details) + ")"
+        self._verbose_log(summary)
+
+    def submit(
+        self, request: SubmitRequest, *, operation_timeout: float | None = None
+    ) -> CommandResult:
         args = CommandBuilder.build_submit_args(request)
-        return self._run(action="submit", args=args, local_execution=request.local)
+        return self._run(
+            action="submit",
+            args=args,
+            local_execution=request.local,
+            operation_timeout=operation_timeout,
+        )
 
-    def status(self, job_ids: list[int]) -> CommandResult:
+    def status(
+        self, job_ids: list[int], *, operation_timeout: float | None = None
+    ) -> CommandResult:
         args = CommandBuilder.build_status_args(job_ids)
-        return self._run(action="status", args=args, local_execution=False)
+        return self._run(
+            action="status",
+            args=args,
+            local_execution=False,
+            operation_timeout=operation_timeout,
+        )
 
-    def kill(self, job_ids: list[int]) -> CommandResult:
+    def kill(
+        self, job_ids: list[int], *, operation_timeout: float | None = None
+    ) -> CommandResult:
         args = CommandBuilder.build_kill_args(job_ids)
-        return self._run(action="kill", args=args, local_execution=False)
+        return self._run(
+            action="kill",
+            args=args,
+            local_execution=False,
+            operation_timeout=operation_timeout,
+        )
 
-    def venue_status(self, venues: list[str] | None = None) -> CommandResult:
+    def venue_status(
+        self,
+        venues: list[str] | None = None,
+        *,
+        operation_timeout: float | None = None,
+    ) -> CommandResult:
         args = CommandBuilder.build_venue_status_args(venues)
-        return self._run(action="venue-status", args=args, local_execution=False)
+        return self._run(
+            action="venue-status",
+            args=args,
+            local_execution=False,
+            operation_timeout=operation_timeout,
+        )
 
-    def raw(self, args: list[str]) -> CommandResult:
+    def raw(
+        self, args: list[str], *, operation_timeout: float | None = None
+    ) -> CommandResult:
         if not args:
             raise ValueError("args cannot be empty")
-        return self._run(action="raw", args=args, local_execution=False)
+        return self._run(
+            action="raw",
+            args=args,
+            local_execution=False,
+            operation_timeout=operation_timeout,
+        )
 
     def validate_submit_request(self, request: SubmitRequest) -> SubmitValidationResult:
         checks: list[ValidationCheck] = []
@@ -880,7 +958,11 @@ class NanoHUBSubmitClient:
         client_id_hex = uuid.uuid4().hex
 
         try:
+            self._verbose_log(
+                "server probe connect attempt (uris=%s)" % ", ".join(cfg.listen_uris)
+            )
             conn.connect()
+            self._verbose_log("server probe connected")
             signature_path = self._send_execution_context(
                 conn=conn,
                 cfg=cfg,
@@ -888,6 +970,7 @@ class NanoHUBSubmitClient:
                 args=["--help"],
             )
             for message in creds.to_signon_messages():
+                self._trace_message("->", message)
                 conn.send_json(message)
 
             deadline = time.time() + max(5.0, self.connect_timeout + 2.0)
@@ -895,6 +978,7 @@ class NanoHUBSubmitClient:
                 message = conn.receive_json(timeout=self.idle_timeout)
                 if message is None:
                     continue
+                self._trace_message("<-", message)
 
                 message_type = message.get("messageType")
                 if message_type == "serverId":
@@ -923,6 +1007,7 @@ class NanoHUBSubmitClient:
                         )
                         if auth_hash:
                             signon_message["authenticationHash"] = auth_hash
+                    self._trace_message("->", signon_message)
                     conn.send_json(signon_message)
                 elif message_type == "authz":
                     if not bool(message.get("success")):
@@ -949,9 +1034,27 @@ class NanoHUBSubmitClient:
 
         raise CommandExecutionError("server probe timed out waiting for authz")
 
-    def _run(self, *, action: str, args: list[str], local_execution: bool) -> CommandResult:
+    def _run(
+        self,
+        *,
+        action: str,
+        args: list[str],
+        local_execution: bool,
+        operation_timeout: float | None = None,
+    ) -> CommandResult:
+        effective_timeout = (
+            self.operation_timeout if operation_timeout is None else operation_timeout
+        )
+        if effective_timeout is not None and effective_timeout <= 0:
+            raise ValueError("operation_timeout must be positive when provided")
+
         cfg = self._load_config()
         creds = self._load_credentials()
+        self._verbose_log(
+            "starting action=%s args=%s"
+            % (action, " ".join(args) if args else "<none>")
+        )
+        self._verbose_log("connect URIs: %s" % ", ".join(cfg.listen_uris))
         state = _SessionState(
             client_id_hex=uuid.uuid4().hex,
             action=action,
@@ -966,8 +1069,10 @@ class NanoHUBSubmitClient:
 
         signature_path: str | None = None
         last_send_time = time.time()
+        started_at = time.time()
         try:
             conn.connect()
+            self._verbose_log("connected to submit server")
             signature_path = self._send_execution_context(
                 conn=conn,
                 cfg=cfg,
@@ -975,17 +1080,30 @@ class NanoHUBSubmitClient:
                 args=args,
             )
             for message in creds.to_signon_messages():
+                self._trace_message("->", message)
                 conn.send_json(message)
                 last_send_time = time.time()
 
             while state.exit_code is None:
+                if (
+                    effective_timeout is not None
+                    and time.time() - started_at >= effective_timeout
+                ):
+                    raise CommandExecutionError(
+                        "timed out waiting for %s response after %.1fs"
+                        % (action, effective_timeout)
+                    )
+
                 server_message = conn.receive_json(timeout=self.idle_timeout)
                 if server_message is None:
                     if time.time() - last_send_time >= self.keepalive_interval:
-                        conn.send_json({"messageType": "null"})
+                        keepalive = {"messageType": "null"}
+                        self._trace_message("->", keepalive)
+                        conn.send_json(keepalive)
                         last_send_time = time.time()
                     continue
 
+                self._trace_message("<-", server_message)
                 state.server_messages.append(server_message)
                 outbound_messages = self._process_server_message(
                     conn=conn,
@@ -995,6 +1113,7 @@ class NanoHUBSubmitClient:
                 )
                 if outbound_messages:
                     for outbound in outbound_messages:
+                        self._trace_message("->", outbound)
                         conn.send_json(outbound)
                         last_send_time = time.time()
         except AuthenticationError:
@@ -1024,6 +1143,10 @@ class NanoHUBSubmitClient:
             job_id=state.job_id,
             run_name=state.run_name,
             server_version=state.server_version,
+        )
+        self._verbose_log(
+            "finished action=%s returncode=%d job_id=%s run_name=%s"
+            % (action, result.returncode, result.job_id, result.run_name)
         )
         if self.check and not result.ok:
             raise CommandExecutionError(

@@ -23,10 +23,15 @@ class _FakeDoctor:
 class _FakeClient:
     def __init__(self) -> None:
         self.raw_calls: List[List[str]] = []
+        self.raw_operation_timeouts: List[float | None] = []
         self.doctor_calls: List[bool] = []
+        self.venue_status_operation_timeouts: List[float | None] = []
 
-    def raw(self, args: List[str]) -> CommandResult:
+    def raw(
+        self, args: List[str], operation_timeout: float | None = None
+    ) -> CommandResult:
         self.raw_calls.append(list(args))
+        self.raw_operation_timeouts.append(operation_timeout)
         key = tuple(args)
         payloads = {
             ("--help", "tools"): "Available tools:\n  abacus - desc\n  gem5 - desc\n",
@@ -47,7 +52,12 @@ class _FakeClient:
         self.doctor_calls.append(probe_server)
         return _FakeDoctor()
 
-    def venue_status(self, venues=None) -> CommandResult:  # noqa: ANN001
+    def venue_status(
+        self,
+        venues=None,  # noqa: ANN001
+        operation_timeout: float | None = None,
+    ) -> CommandResult:
+        self.venue_status_operation_timeouts.append(operation_timeout)
         return CommandResult(
             args=["submit", "--venueStatus"],
             returncode=0,
@@ -90,6 +100,7 @@ def test_load_available_catalog_queries_all_lists() -> None:
         ["--help", "venues"],
         ["--help", "managers"],
     ]
+    assert client.raw_operation_timeouts == [20.0, 20.0, 20.0]
 
 
 def test_explore_submit_server_collects_doctor_catalog_and_venue_status() -> None:
@@ -105,3 +116,5 @@ def test_explore_submit_server_collects_doctor_catalog_and_venue_status() -> Non
         {"venue": "community", "status": "down"},
     ]
     assert client.doctor_calls == [True]
+    assert client.raw_operation_timeouts == [20.0, 20.0, 20.0]
+    assert client.venue_status_operation_timeouts == [20.0]

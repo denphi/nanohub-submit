@@ -7,7 +7,11 @@ import uuid
 
 import pytest
 
-from nanohubsubmit.client import AuthenticationError, NanoHUBSubmitClient
+from nanohubsubmit.client import (
+    AuthenticationError,
+    CommandExecutionError,
+    NanoHUBSubmitClient,
+)
 from nanohubsubmit.models import SubmitRequest
 from nanohubsubmit.wire import SubmitWireConnection
 
@@ -74,6 +78,8 @@ class _FakeSubmitServer(threading.Thread):
                 self._run_submit(self.conn)
             elif self.scenario == "auth-fail":
                 self._run_auth_fail(self.conn)
+            elif self.scenario == "raw-hang":
+                self._run_raw_hang(self.conn)
             else:
                 raise ValueError(f"unknown scenario {self.scenario!r}")
         except Exception as exc:  # pragma: no cover - test helper diagnostics
@@ -166,6 +172,39 @@ class _FakeSubmitServer(threading.Thread):
                 _send_json(conn, {"messageType": "authz", "success": False, "retry": False})
                 return
 
+    def _run_raw_hang(self, conn: socket.socket) -> None:
+        _send_json(conn, {"messageType": "serverId", "serverId": str(uuid.uuid4())})
+        _send_json(conn, {"messageType": "serverVersion", "version": "1.0.0"})
+
+        buffer = b""
+        try:
+            while True:
+                message, buffer = _recv_json(conn, buffer)
+                message_type = str(message.get("messageType", ""))
+                self.received_message_types.append(message_type)
+
+                if message_type == "clientReadyForSignon":
+                    _send_json(conn, {"messageType": "serverReadyForSignon"})
+                elif message_type == "signon":
+                    _send_json(
+                        conn,
+                        {
+                            "messageType": "authz",
+                            "success": True,
+                            "retry": False,
+                            "hasDistributor": True,
+                            "hasHarvester": True,
+                            "hasJobStatus": True,
+                            "hasJobKill": True,
+                            "hasVenueProbe": True,
+                        },
+                    )
+                elif message_type == "parseArguments":
+                    # Keep the session open and never emit exit to trigger client timeout.
+                    continue
+        except EOFError:
+            return
+
 
 def _make_client() -> NanoHUBSubmitClient:
     return NanoHUBSubmitClient(
@@ -243,5 +282,18 @@ def test_client_raises_on_authentication_failure(monkeypatch: pytest.MonkeyPatch
     client = _make_client()
     with pytest.raises(AuthenticationError, match="authentication failed"):
         client.status([1])
+
+    _assert_server_ok(server)
+
+
+def test_client_raw_operation_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    client_conn, server_conn = socket.socketpair()
+    _patch_connection(monkeypatch, client_conn)
+    server = _FakeSubmitServer("raw-hang", server_conn)
+    server.start()
+
+    client = _make_client()
+    with pytest.raises(CommandExecutionError, match="timed out waiting for raw response"):
+        client.raw(["--help", "tools"], operation_timeout=0.25)
 
     _assert_server_ok(server)

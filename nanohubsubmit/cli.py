@@ -63,11 +63,24 @@ def _emit_catalog_text(catalog: dict) -> None:
             sys.stdout.write("  (none)\n")
 
 
+def _add_verbose_argument(
+    parser: argparse.ArgumentParser, *, default: object = False
+) -> None:
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=default,
+        help="Enable verbose protocol tracing",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="nanohub-submit",
         description="Modern standalone client for NanoHUB submit.",
     )
+    _add_verbose_argument(parser, default=False)
     parser.add_argument(
         "--config",
         default=DEFAULT_CONFIG_PATH,
@@ -147,6 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="action", required=True)
 
     submit = subparsers.add_parser("submit", help="Submit a command")
+    _add_verbose_argument(submit, default=argparse.SUPPRESS)
     submit.add_argument("--debug", action="store_true")
     submit.add_argument("--local", action="store_true")
     submit.add_argument("--asynchronous", action="store_true")
@@ -194,17 +208,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     status = subparsers.add_parser("status", help="Query job status")
+    _add_verbose_argument(status, default=argparse.SUPPRESS)
     status.add_argument("job_ids", nargs="+", type=int)
 
     kill = subparsers.add_parser("kill", help="Kill jobs")
+    _add_verbose_argument(kill, default=argparse.SUPPRESS)
     kill.add_argument("job_ids", nargs="+", type=int)
 
     venue_status = subparsers.add_parser("venue-status", help="Query venue status")
+    _add_verbose_argument(venue_status, default=argparse.SUPPRESS)
     venue_status.add_argument("venues", nargs="*")
 
     catalog = subparsers.add_parser(
         "catalog", help="Load available tools, venues, and managers"
     )
+    _add_verbose_argument(catalog, default=argparse.SUPPRESS)
     catalog.add_argument(
         "--raw-help",
         action="store_true",
@@ -220,6 +238,7 @@ def build_parser() -> argparse.ArgumentParser:
     explore = subparsers.add_parser(
         "explore", help="Explore server capabilities and available metadata"
     )
+    _add_verbose_argument(explore, default=argparse.SUPPRESS)
     explore.add_argument(
         "--raw-help",
         action="store_true",
@@ -238,6 +257,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     raw = subparsers.add_parser("raw", help="Pass through raw submit args")
+    _add_verbose_argument(raw, default=argparse.SUPPRESS)
     raw.add_argument("args", nargs=argparse.REMAINDER)
 
     return parser
@@ -246,6 +266,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     ns = parser.parse_args(argv)
+    verbose = bool(getattr(ns, "verbose", False))
 
     client = NanoHUBSubmitClient(
         config_path=ns.config,
@@ -262,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
         connect_timeout=ns.connect_timeout,
         idle_timeout=ns.idle_timeout,
         keepalive_interval=ns.keepalive_interval,
+        verbose=verbose,
     )
 
     try:

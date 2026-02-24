@@ -21,12 +21,12 @@ python3 -m pip install -e .
 ## CLI examples
 
 ```bash
-nanohub-submit submit --config /etc/submit/submit-client.conf --venue workspace -- python3 run.py
-nanohub-submit status 12345 12346
-nanohub-submit kill 12345
-nanohub-submit venue-status
-nanohub-submit catalog --format json
-nanohub-submit explore --format json
+nanohub-submit submit --verbose --config /etc/submit/submit-client.conf --venue workspace -- python3 run.py
+nanohub-submit status --verbose 12345 12346
+nanohub-submit kill --verbose 12345
+nanohub-submit venue-status --verbose
+nanohub-submit catalog --verbose --format json
+nanohub-submit explore --verbose --format json
 ```
 
 ## Python usage
@@ -34,7 +34,10 @@ nanohub-submit explore --format json
 ```python
 from nanohubsubmit import NanoHUBSubmitClient, SubmitRequest
 
-client = NanoHUBSubmitClient(config_path="/etc/submit/submit-client.conf")
+client = NanoHUBSubmitClient(
+    config_path="/etc/submit/submit-client.conf",
+    verbose=True,
+)
 request = SubmitRequest(
     command="python3",
     command_arguments=["run.py", "--size", "100"],
@@ -53,13 +56,19 @@ print(result.stdout)
 from nanohubsubmit import NanoHUBSubmitClient
 from nanohubsubmit.utils import load_available_catalog, explore_submit_server
 
-client = NanoHUBSubmitClient(config_path="/etc/submit/submit-client.conf")
+client = NanoHUBSubmitClient(
+    config_path="/etc/submit/submit-client.conf",
+    verbose=True,
+)
 
-catalog = load_available_catalog(client)
+catalog = load_available_catalog(client, operation_timeout=20.0)
 print(catalog.tools)
 print(catalog.venues)
 print(catalog.managers)
 
-exploration = explore_submit_server(client).to_dict()
+exploration = explore_submit_server(client, operation_timeout=20.0).to_dict()
 print(exploration["doctor"])
 ```
+
+`operation_timeout` prevents metadata discovery calls from hanging forever if the
+submit server does not emit an exit frame.
