@@ -81,7 +81,7 @@ Equivalent to:
 ```python
 from nanohubsubmit import NanoHUBSubmitClient, ProgressMode, SubmitRequest
 
-client = NanoHUBSubmitClient(verbose=True, local_fast_path=False)
+client = NanoHUBSubmitClient(verbose=True)
 result = client.submit(
     SubmitRequest(
         command="echo",
@@ -134,8 +134,9 @@ submit server does not emit an exit frame (default is 60 seconds).
 `pegasus`, and `silent`.
 
 Local submissions (`SubmitRequest(..., local=True)`) use a direct fast path by
-default for immediate execution. Set `local_fast_path=False` when creating the
-client to force local mode through the submit server protocol.
+default for immediate execution. This path also supports parameter sweeps and
+`progress=submit` output. The legacy wire-protocol local mode is not fully
+implemented, so local requests always use the fast path.
 
 ## Preflight Validation And Run Tracking
 

@@ -74,7 +74,7 @@ def test_live_submit_local_ls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_live_submit_local_parameter_sweep_submit_progress() -> None:
-    client = _make_live_client(local_fast_path=False)
+    client = _make_live_client()
     result = client.submit(
         SubmitRequest(
             command="echo",

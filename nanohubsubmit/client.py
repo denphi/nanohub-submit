@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import itertools
 import os
 import re
 import shutil
@@ -23,7 +24,7 @@ except ImportError:  # pragma: no cover - Python 3.7 compatibility
 from .auth import SignonCredentials, load_signon_credentials
 from .builder import CommandBuilder
 from .config import DEFAULT_CONFIG_PATH, SubmitClientConfig, load_submit_client_config
-from .models import SubmitRequest
+from .models import ProgressMode, SubmitRequest
 from .wire import (
     ConnectionClosedError,
     SubmitWireConnection,
@@ -107,6 +108,79 @@ def _is_stream_tty(stream: Any) -> bool:
         return bool(isatty())
     except Exception:
         return False
+
+
+def _format_submit_progress_line(
+    *,
+    finished: int,
+    failed: int,
+    aborted: int,
+    executing: int,
+    setup: int,
+    setting_up: int,
+    total: int,
+) -> str:
+    completed = finished + failed + aborted
+    percent_done = (100.0 * float(completed) / float(total)) if total > 0 else 100.0
+    return (
+        "=SUBMIT-PROGRESS=> "
+        "aborted=%d finished=%d failed=%d executing=%d waiting=0 setup=%d setting_up=%d "
+        "%%done=%.2f timestamp=%.1f"
+        % (
+            aborted,
+            finished,
+            failed,
+            executing,
+            setup,
+            setting_up,
+            percent_done,
+            time.time(),
+        )
+    )
+
+
+def _expand_local_parameter_sweep(
+    request: SubmitRequest,
+) -> list[dict[str, str]]:
+    if not request.parameters:
+        return [{}]
+
+    separator = "," if request.separator is None else str(request.separator)
+    if not separator:
+        raise ValueError("--separator cannot be empty")
+
+    parameter_specs: list[tuple[str, list[str]]] = []
+    for raw_parameter in request.parameters:
+        spec = str(raw_parameter).strip()
+        if not spec:
+            raise ValueError("parameter entries cannot be empty")
+        if "=" not in spec:
+            raise ValueError("parameter must be in NAME=VALUE format: %s" % spec)
+        name, raw_values = spec.split("=", 1)
+        name = name.strip()
+        if not name:
+            raise ValueError("parameter name cannot be empty")
+        values = [item.strip() for item in raw_values.split(separator)]
+        values = [item for item in values if item != ""]
+        if not values:
+            raise ValueError("parameter %s must include at least one value" % name)
+        parameter_specs.append((name, values))
+
+    names = [entry[0] for entry in parameter_specs]
+    value_lists = [entry[1] for entry in parameter_specs]
+    combinations: list[dict[str, str]] = []
+    for selected in itertools.product(*value_lists):
+        combinations.append(
+            {str(name): str(value) for name, value in zip(names, selected)}
+        )
+    return combinations
+
+
+def _apply_substitutions(text: str, substitutions: dict[str, str]) -> str:
+    rendered = str(text)
+    for key, value in substitutions.items():
+        rendered = rendered.replace(key, value)
+    return rendered
 
 
 def _discover_mount_device(path: str) -> str:
@@ -497,7 +571,11 @@ class NanoHUBSubmitClient:
         self, request: SubmitRequest, *, operation_timeout: float | None = None
     ) -> CommandResult:
         started_at = time.time()
-        if request.local and self.local_fast_path:
+        if request.local:
+            if not self.local_fast_path:
+                self._verbose_log(
+                    "local submit protocol is not fully implemented; using local-fast-path"
+                )
             result = self._run_local_submit(request, operation_timeout=operation_timeout)
         else:
             args = CommandBuilder.build_submit_args(request)
@@ -1338,46 +1416,134 @@ class NanoHUBSubmitClient:
     def _run_local_submit(
         self, request: SubmitRequest, *, operation_timeout: float | None = None
     ) -> CommandResult:
-        command = [request.command, *list(request.command_arguments)]
+        parameter_combinations = _expand_local_parameter_sweep(request)
         effective_timeout = (
             self.operation_timeout if operation_timeout is None else operation_timeout
         )
         if effective_timeout is not None and effective_timeout <= 0:
             raise ValueError("operation_timeout must be positive when provided")
 
-        env = os.environ.copy()
-        for key, value in request.environment.items():
-            if value is None:
-                continue
-            env[str(key)] = str(value)
+        progress_submit = request.progress == ProgressMode.SUBMIT
+        total_runs = len(parameter_combinations)
+        finished = 0
+        failed = 0
+        aborted = 0
+        started_runs = 0
+
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+        last_returncode = 0
+        started_at = time.time()
 
         self._verbose_log(
-            "starting local-fast-path command=%s"
-            % (" ".join(command) if command else "<none>")
-        )
-        try:
-            completed = subprocess.run(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-                timeout=effective_timeout,
-                env=env,
+            "starting local-fast-path command=%s sweeps=%d"
+            % (
+                " ".join([request.command, *list(request.command_arguments)]),
+                total_runs,
             )
-        except subprocess.TimeoutExpired as exc:
-            timeout = effective_timeout if effective_timeout is not None else 0.0
-            raise CommandExecutionError(
-                "timed out waiting for local command after %.1fs" % timeout
-            ) from exc
-        except OSError as exc:
-            raise CommandExecutionError(str(exc)) from exc
+        )
+        if progress_submit:
+            stdout_chunks.append(
+                _format_submit_progress_line(
+                    finished=finished,
+                    failed=failed,
+                    aborted=aborted,
+                    executing=0,
+                    setup=max(total_runs - started_runs, 0),
+                    setting_up=0,
+                    total=total_runs,
+                )
+                + "\n"
+            )
+
+        for substitutions in parameter_combinations:
+            command = [
+                _apply_substitutions(request.command, substitutions),
+                *[
+                    _apply_substitutions(arg, substitutions)
+                    for arg in list(request.command_arguments)
+                ],
+            ]
+            env = os.environ.copy()
+            for key, value in request.environment.items():
+                if value is None:
+                    continue
+                env[str(key)] = _apply_substitutions(str(value), substitutions)
+
+            started_runs += 1
+            if progress_submit:
+                stdout_chunks.append(
+                    _format_submit_progress_line(
+                        finished=finished,
+                        failed=failed,
+                        aborted=aborted,
+                        executing=1,
+                        setup=max(total_runs - started_runs, 0),
+                        setting_up=0,
+                        total=total_runs,
+                    )
+                    + "\n"
+                )
+
+            timeout_for_run: float | None = None
+            if effective_timeout is not None:
+                elapsed = time.time() - started_at
+                remaining = effective_timeout - elapsed
+                if remaining <= 0:
+                    raise CommandExecutionError(
+                        "timed out waiting for local command after %.1fs"
+                        % effective_timeout
+                    )
+                timeout_for_run = remaining
+
+            try:
+                completed = subprocess.run(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                    timeout=timeout_for_run,
+                    env=env,
+                )
+            except subprocess.TimeoutExpired as exc:
+                timeout = effective_timeout if effective_timeout is not None else 0.0
+                raise CommandExecutionError(
+                    "timed out waiting for local command after %.1fs" % timeout
+                ) from exc
+            except OSError as exc:
+                raise CommandExecutionError(str(exc)) from exc
+
+            if completed.stdout:
+                stdout_chunks.append(completed.stdout)
+            if completed.stderr:
+                stderr_chunks.append(completed.stderr)
+
+            last_returncode = int(completed.returncode)
+            if last_returncode == 0:
+                finished += 1
+            else:
+                failed += 1
+
+            if progress_submit:
+                stdout_chunks.append(
+                    _format_submit_progress_line(
+                        finished=finished,
+                        failed=failed,
+                        aborted=aborted,
+                        executing=0,
+                        setup=max(total_runs - started_runs, 0),
+                        setting_up=0,
+                        total=total_runs,
+                    )
+                    + "\n"
+                )
 
         result = CommandResult(
-            args=["submit", "--local", *command],
-            returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
+            args=["submit", "--local", request.command, *list(request.command_arguments)],
+            returncode=0 if (failed == 0 and aborted == 0) else (last_returncode or 1),
+            stdout="".join(stdout_chunks),
+            stderr="".join(stderr_chunks),
             authenticated=False,
             server_disconnected=False,
             server_messages=[],

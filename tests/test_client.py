@@ -15,7 +15,7 @@ from nanohubsubmit.client import (
     NanoHUBSubmitClient,
     _is_stream_tty,
 )
-from nanohubsubmit.models import SubmitRequest
+from nanohubsubmit.models import ProgressMode, SubmitRequest
 from nanohubsubmit.utils import SubmitCatalog
 import nanohubsubmit.utils as submit_utils
 from nanohubsubmit.wire import SubmitWireConnection
@@ -227,7 +227,7 @@ class _FakeSubmitServer(threading.Thread):
             return
 
 
-def _make_client() -> NanoHUBSubmitClient:
+def _make_client(local_fast_path: bool = True) -> NanoHUBSubmitClient:
     return NanoHUBSubmitClient(
         config_path="",
         listen_uris=["tcp://example.invalid:1"],
@@ -236,6 +236,7 @@ def _make_client() -> NanoHUBSubmitClient:
         connect_timeout=2.0,
         idle_timeout=0.1,
         keepalive_interval=0.2,
+        local_fast_path=local_fast_path,
     )
 
 
@@ -470,6 +471,36 @@ def test_client_submit_local_fast_path_timeout() -> None:
             ),
             operation_timeout=0.1,
         )
+
+
+def test_client_submit_local_parameter_sweep_submit_progress() -> None:
+    client = _make_client(local_fast_path=False)
+    result = client.submit(
+        SubmitRequest(
+            command=sys.executable,
+            command_arguments=[
+                "-c",
+                "import sys; print(sys.argv[1])",
+                "@@name",
+            ],
+            local=True,
+            separator=",",
+            parameters=["@@name=hub1,hub2,hub3"],
+            progress=ProgressMode.SUBMIT,
+        ),
+        operation_timeout=10.0,
+    )
+    assert result.returncode == 0, result.to_dict()
+    progress_lines = [
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith("=SUBMIT-PROGRESS=>")
+    ]
+    assert progress_lines
+    assert any("%done=100.00" in line for line in progress_lines)
+    assert "hub1" in result.stdout
+    assert "hub2" in result.stdout
+    assert "hub3" in result.stdout
 
 
 def test_client_catalog_is_loaded_on_demand_and_cached(
