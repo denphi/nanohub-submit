@@ -174,7 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--gpn", type=int)
     submit.add_argument("--stripes", type=int)
     submit.add_argument("--memory-mb", type=int)
-    submit.add_argument("--wall-time", type=int)
+    submit.add_argument("--wall-time")
     submit.add_argument("--env", action="append", default=[])
     submit.add_argument("--run-name")
     submit.add_argument("--manager")
@@ -183,10 +183,16 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--detach", action="store_true")
     submit.add_argument("--attach-id")
     submit.add_argument("--wait", action="store_true")
-    submit.add_argument(
+    quota_group = submit.add_mutually_exclusive_group()
+    quota_group.add_argument(
         "--noquota",
         action="store_true",
         help="Disable quota checks",
+    )
+    quota_group.add_argument(
+        "--quota",
+        action="store_true",
+        help="Explicitly enable quota checks",
     )
     submit.add_argument("--tail-stdout", type=int)
     submit.add_argument("--tail-stderr", type=int)
@@ -314,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
                 detach=ns.detach,
                 attach_id=ns.attach_id,
                 wait=ns.wait,
-                quota=not ns.noquota,
+                quota=bool(ns.quota) or not bool(ns.noquota),
                 tail_stdout=ns.tail_stdout,
                 tail_stderr=ns.tail_stderr,
                 tail_files=ns.tail_file,

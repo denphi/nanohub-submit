@@ -8,6 +8,7 @@ from typing import Mapping
 class ProgressMode(str, Enum):
     """Supported progress renderers."""
 
+    AUTO = "auto"
     CURSES = "curses"
     SUBMIT = "submit"
     TEXT = "text"
@@ -37,7 +38,7 @@ class SubmitRequest:
     gpn: int | None = None
     stripes: int | None = None
     memory_mb: int | None = None
-    wall_time: int | None = None
+    wall_time: int | str | None = None
 
     environment: Mapping[str, str | None] = field(default_factory=dict)
 

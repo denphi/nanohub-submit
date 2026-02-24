@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+import re
 
 from .models import SubmitRequest
 
@@ -16,6 +17,36 @@ def _append_int(args: list[str], option: str, value: int | None) -> None:
     if value < 0:
         raise ValueError(f"{option} cannot be negative")
     args.extend([option, str(value)])
+
+
+_WALL_TIME_HHMMSS = re.compile(r"^\d+:\d{2}:\d{2}$")
+
+
+def _append_wall_time(args: list[str], value: int | str | None) -> None:
+    if value is None:
+        return
+
+    if isinstance(value, int):
+        if value < 0:
+            raise ValueError("--wallTime cannot be negative")
+        args.extend(["--wallTime", str(value)])
+        return
+
+    wall_time = str(value).strip()
+    if not wall_time:
+        raise ValueError("--wallTime cannot be empty")
+
+    if wall_time.isdigit():
+        if int(wall_time) < 0:
+            raise ValueError("--wallTime cannot be negative")
+        args.extend(["--wallTime", wall_time])
+        return
+
+    if _WALL_TIME_HHMMSS.match(wall_time):
+        args.extend(["--wallTime", wall_time])
+        return
+
+    raise ValueError("--wallTime must be minutes or hh:mm:ss")
 
 
 class CommandBuilder:
@@ -48,7 +79,7 @@ class CommandBuilder:
         _append_int(args, "--gpn", request.gpn)
         _append_int(args, "--stripes", request.stripes)
         _append_int(args, "--memory", request.memory_mb)
-        _append_int(args, "--wallTime", request.wall_time)
+        _append_wall_time(args, request.wall_time)
 
         for key, value in request.environment.items():
             if not key:

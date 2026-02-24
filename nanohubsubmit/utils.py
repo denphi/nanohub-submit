@@ -35,6 +35,9 @@ _LINE_STOPWORDS = {
 }
 
 
+_CATALOG_DETAILS = ("tools", "venues", "managers")
+
+
 def _dedupe_keep_order(values: Iterable[str]) -> List[str]:
     seen = set()
     ordered = []
@@ -122,6 +125,59 @@ def parse_help_items(text: str) -> List[str]:
     return _dedupe_keep_order(parsed)
 
 
+def _filter_names(
+    values: Iterable[str],
+    query: str,
+    *,
+    exact: bool = False,
+    case_sensitive: bool = False,
+    use_regex: bool = False,
+    limit: int | None = None,
+) -> List[str]:
+    if limit is not None and limit < 0:
+        raise ValueError("limit cannot be negative")
+    query = query or ""
+
+    if use_regex:
+        flags = 0 if case_sensitive else re.IGNORECASE
+        regex = re.compile(query, flags)
+    else:
+        regex = None
+        query_cmp = query if case_sensitive else query.lower()
+
+    filtered: List[str] = []
+    for value in values:
+        text = str(value)
+        text_cmp = text if case_sensitive else text.lower()
+        matched = False
+        if regex is not None:
+            matched = bool(regex.search(text))
+        elif exact:
+            matched = text_cmp == query_cmp
+        else:
+            matched = query_cmp in text_cmp
+
+        if matched:
+            filtered.append(text)
+            if limit is not None and len(filtered) >= limit:
+                break
+    return filtered
+
+
+def _normalize_details(details: Iterable[str] | None) -> List[str]:
+    if details is None:
+        return list(_CATALOG_DETAILS)
+
+    normalized: List[str] = []
+    for detail in details:
+        lowered = str(detail).strip().lower()
+        if lowered not in _CATALOG_DETAILS:
+            raise ValueError("detail must be one of: tools, venues, managers")
+        if lowered not in normalized:
+            normalized.append(lowered)
+    return normalized
+
+
 def parse_venue_status(text: str) -> List[Dict[str, str]]:
     """
     Parse venue status output into structured dictionaries.
@@ -199,6 +255,48 @@ class SubmitCatalog:
     managers: List[str] = field(default_factory=list)
     raw_help: Dict[str, str] = field(default_factory=dict)
 
+    def entries(self, detail: str) -> List[str]:
+        lowered = detail.strip().lower()
+        if lowered == "tools":
+            return list(self.tools)
+        if lowered == "venues":
+            return list(self.venues)
+        if lowered == "managers":
+            return list(self.managers)
+        raise ValueError("detail must be one of: tools, venues, managers")
+
+    def contains(
+        self, detail: str, name: str, *, case_sensitive: bool = False
+    ) -> bool:
+        values = self.entries(detail)
+        if case_sensitive:
+            return name in values
+        target = name.lower()
+        return any(value.lower() == target for value in values)
+
+    def filter(
+        self,
+        query: str,
+        *,
+        details: Iterable[str] | None = None,
+        exact: bool = False,
+        case_sensitive: bool = False,
+        use_regex: bool = False,
+        limit: int | None = None,
+    ) -> Dict[str, List[str]]:
+        selected = _normalize_details(details)
+        return {
+            detail: _filter_names(
+                self.entries(detail),
+                query,
+                exact=exact,
+                case_sensitive=case_sensitive,
+                use_regex=use_regex,
+                limit=limit,
+            )
+            for detail in selected
+        }
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "tools": list(self.tools),
@@ -231,6 +329,53 @@ def load_available_catalog(
         venues=_load("venues"),
         managers=_load("managers"),
         raw_help=raw_help,
+    )
+
+
+def filter_catalog(
+    catalog: SubmitCatalog,
+    query: str,
+    *,
+    details: Iterable[str] | None = None,
+    exact: bool = False,
+    case_sensitive: bool = False,
+    use_regex: bool = False,
+    limit: int | None = None,
+) -> Dict[str, List[str]]:
+    return catalog.filter(
+        query,
+        details=details,
+        exact=exact,
+        case_sensitive=case_sensitive,
+        use_regex=use_regex,
+        limit=limit,
+    )
+
+
+def find_catalog_entries(
+    client: NanoHUBSubmitClient,
+    query: str,
+    *,
+    details: Iterable[str] | None = None,
+    exact: bool = False,
+    case_sensitive: bool = False,
+    use_regex: bool = False,
+    limit: int | None = 25,
+    operation_timeout: float = 60.0,
+) -> Dict[str, List[str]]:
+    get_catalog = getattr(client, "get_catalog", None)
+    if callable(get_catalog):
+        catalog = get_catalog(operation_timeout=operation_timeout)
+    else:
+        catalog = load_available_catalog(client, operation_timeout=operation_timeout)
+    return filter_catalog(
+        catalog,
+        query,
+        details=details,
+        exact=exact,
+        case_sensitive=case_sensitive,
+        use_regex=use_regex,
+        limit=limit,
     )
 
 

@@ -67,6 +67,7 @@ request = SubmitRequest(
     command_arguments=["run.py", "--size", "100"],
     venues=["workspace"],
     n_cpus=4,
+    wall_time="01:30:00",  # also accepts integer minutes
     wait=True,
 )
 result = client.submit(request)
@@ -78,7 +79,11 @@ print(result.stdout)
 
 ```python
 from nanohubsubmit import NanoHUBSubmitClient
-from nanohubsubmit.utils import load_available_catalog, explore_submit_server
+from nanohubsubmit.utils import (
+    load_available_catalog,
+    explore_submit_server,
+    find_catalog_entries,
+)
 
 client = NanoHUBSubmitClient(
     verbose=True,
@@ -91,6 +96,9 @@ print(catalog.managers)
 
 exploration = explore_submit_server(client, operation_timeout=60.0).to_dict()
 print(exploration["doctor"])
+
+# Filter catalog entries by name (server-backed):
+print(find_catalog_entries(client, "espresso", details=["tools"], limit=10))
 ```
 
 `operation_timeout` prevents metadata discovery calls from hanging forever if the
@@ -99,9 +107,40 @@ submit server does not emit an exit frame (default is 60 seconds).
 `NanoHUBSubmitClient` uses `/etc/submit/submit-client.conf` by default. Pass
 `config_path=...` only when you need a non-default config file.
 
+`SubmitRequest.progress` supports: `auto`, `curses`, `submit`, `text`,
+`pegasus`, and `silent`.
+
 Local submissions (`SubmitRequest(..., local=True)`) use a direct fast path by
 default for immediate execution. Set `local_fast_path=False` when creating the
 client to force local mode through the submit server protocol.
+
+## Preflight Validation And Run Tracking
+
+```python
+from nanohubsubmit import NanoHUBSubmitClient, SubmitRequest
+
+client = NanoHUBSubmitClient()
+
+request = SubmitRequest(
+    command="abacus",
+    venues=["workspace"],
+    input_files=["input.dat"],
+)
+
+# Includes command shape, file existence, and catalog checks (tool/venue/manager).
+validation = client.preflight_submit_request(
+    request,
+    extra_existing_paths=["settings.yaml"],
+).to_dict()
+print(validation["ok"])
+
+result = client.submit(request, operation_timeout=120.0)
+print(result.returncode, result.job_id, result.run_name)
+
+# Track runs during the client session:
+for run in client.list_tracked_runs():
+    print(run.to_dict())
+```
 
 ## Jupyter Tutorial
 

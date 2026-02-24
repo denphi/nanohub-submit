@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import socket
 import sys
 import threading
@@ -15,6 +16,8 @@ from nanohubsubmit.client import (
     _is_stream_tty,
 )
 from nanohubsubmit.models import SubmitRequest
+from nanohubsubmit.utils import SubmitCatalog
+import nanohubsubmit.utils as submit_utils
 from nanohubsubmit.wire import SubmitWireConnection
 
 
@@ -315,6 +318,10 @@ def test_client_submit_drives_remote_sequence(monkeypatch: pytest.MonkeyPatch) -
     assert result.run_name == "run-42"
     assert "submitCommandFileInodesSent" in server.received_message_types
     assert "startRemote" in server.received_message_types
+    tracked = client.list_tracked_runs()
+    assert len(tracked) == 1
+    assert tracked[0].job_id == 42
+    assert tracked[0].command == "echo"
 
 
 def test_client_raises_on_authentication_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -444,6 +451,10 @@ def test_client_submit_local_fast_path_runs_immediately() -> None:
     assert result.returncode == 0
     assert "local-fast-path-ok" in result.stdout
     assert result.authenticated is False
+    tracked = client.list_tracked_runs()
+    assert len(tracked) == 1
+    assert tracked[0].local is True
+    assert tracked[0].command == sys.executable
 
 
 def test_client_submit_local_fast_path_timeout() -> None:
@@ -459,3 +470,90 @@ def test_client_submit_local_fast_path_timeout() -> None:
             ),
             operation_timeout=0.1,
         )
+
+
+def test_client_catalog_is_loaded_on_demand_and_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _make_client()
+    calls: list[tuple[bool, float]] = []
+
+    def _fake_load_catalog(
+        _client: NanoHUBSubmitClient,
+        include_raw_help: bool = False,
+        operation_timeout: float = 60.0,
+    ) -> SubmitCatalog:
+        calls.append((include_raw_help, operation_timeout))
+        return SubmitCatalog(
+            tools=["abacus"],
+            venues=["workspace"],
+            managers=["pegasus"],
+        )
+
+    monkeypatch.setattr(submit_utils, "load_available_catalog", _fake_load_catalog)
+
+    first = client.get_catalog(operation_timeout=10.0)
+    second = client.get_catalog(operation_timeout=0.1)
+    assert first.tools == ["abacus"]
+    assert second.tools == ["abacus"]
+    assert len(calls) == 1
+
+    third = client.get_catalog(refresh=True, operation_timeout=5.0)
+    assert third.tools == ["abacus"]
+    assert len(calls) == 2
+
+
+def test_validate_submit_request_catalog_and_extra_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client = _make_client()
+    catalog = SubmitCatalog(
+        tools=["abacus", "gem5"],
+        venues=["workspace"],
+        managers=["pegasus"],
+    )
+
+    def _fake_load_catalog(
+        _client: NanoHUBSubmitClient,
+        include_raw_help: bool = False,  # noqa: ARG001
+        operation_timeout: float = 60.0,  # noqa: ARG001
+    ) -> SubmitCatalog:
+        return catalog
+
+    monkeypatch.setattr(submit_utils, "load_available_catalog", _fake_load_catalog)
+
+    input_file = tmp_path / "input.dat"
+    input_file.write_text("x", encoding="utf-8")
+    extra_file = tmp_path / "extra.cfg"
+    extra_file.write_text("y", encoding="utf-8")
+
+    ok_request = SubmitRequest(
+        command="abacus",
+        venues=["workspace"],
+        manager="pegasus",
+        input_files=[str(input_file)],
+    )
+    ok_validation = client.validate_submit_request(
+        ok_request,
+        check_catalog=True,
+        extra_existing_paths=[str(extra_file)],
+    )
+    assert ok_validation.ok is True
+
+    bad_request = SubmitRequest(
+        command="missing-tool",
+        venues=["missing-venue"],
+        manager="missing-manager",
+        input_files=[str(input_file)],
+    )
+    bad_validation = client.validate_submit_request(
+        bad_request,
+        check_catalog=True,
+        extra_existing_paths=[str(tmp_path / "missing.file")],
+    )
+    assert bad_validation.ok is False
+    messages = [check.message for check in bad_validation.checks]
+    assert any("tool not found in catalog" in message for message in messages)
+    assert any("manager not found in catalog" in message for message in messages)
+    assert any("venue not found in catalog" in message for message in messages)
+    assert any("extra path does not exist" in message for message in messages)

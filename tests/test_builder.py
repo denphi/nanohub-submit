@@ -109,3 +109,23 @@ def test_build_status_and_kill_args() -> None:
         "202",
     ]
     assert CommandBuilder.build_kill_args([1]) == ["--kill", "1"]
+
+
+def test_build_submit_args_supports_wall_time_hhmmss() -> None:
+    request = SubmitRequest(
+        command="echo",
+        command_arguments=["hello"],
+        wall_time="01:30:00",
+        progress=ProgressMode.AUTO,
+    )
+    args = CommandBuilder.build_submit_args(request)
+    assert "--wallTime" in args
+    assert "01:30:00" in args
+    assert "--progress" in args
+    assert "auto" in args
+
+
+def test_build_submit_args_rejects_invalid_wall_time_format() -> None:
+    request = SubmitRequest(command="echo", command_arguments=["hello"], wall_time="1h")
+    with pytest.raises(ValueError, match="--wallTime must be minutes or hh:mm:ss"):
+        CommandBuilder.build_submit_args(request)

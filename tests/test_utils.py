@@ -5,9 +5,12 @@ from typing import Any, Dict, List
 from nanohubsubmit.client import CommandResult
 from nanohubsubmit.utils import (
     explore_submit_server,
+    filter_catalog,
+    find_catalog_entries,
     load_available_catalog,
     parse_help_items,
     parse_venue_status,
+    SubmitCatalog,
 )
 
 
@@ -118,3 +121,26 @@ def test_explore_submit_server_collects_doctor_catalog_and_venue_status() -> Non
     assert client.doctor_calls == [True]
     assert client.raw_operation_timeouts == [60.0, 60.0, 60.0]
     assert client.venue_status_operation_timeouts == [60.0]
+
+
+def test_filter_catalog_finds_matches_by_query() -> None:
+    catalog = SubmitCatalog(
+        tools=["abacus", "gem5", "espresso-7.1_pw"],
+        venues=["workspace", "community"],
+        managers=["pegasus", "local"],
+    )
+    filtered = filter_catalog(catalog, "espresso")
+    assert filtered["tools"] == ["espresso-7.1_pw"]
+    assert filtered["venues"] == []
+    assert filtered["managers"] == []
+
+
+def test_find_catalog_entries_queries_server_and_filters() -> None:
+    client = _FakeClient()
+    matches = find_catalog_entries(client, "work", details=["venues"])
+    assert matches == {"venues": ["workspace"]}
+    assert client.raw_calls == [
+        ["--help", "tools"],
+        ["--help", "venues"],
+        ["--help", "managers"],
+    ]

@@ -4,6 +4,7 @@ import csv
 import hashlib
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -12,7 +13,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, TextIO, TYPE_CHECKING
 
 try:
     from importlib.metadata import PackageNotFoundError, version as package_version
@@ -29,6 +30,9 @@ from .wire import (
     WireProtocolError,
     parse_submit_uri,
 )
+
+if TYPE_CHECKING:
+    from .utils import SubmitCatalog
 
 _ENV_BLACKLIST = {
     "CLASSPATH",
@@ -348,6 +352,36 @@ class SessionsReport:
         }
 
 
+@dataclass
+class SimulationRunRecord:
+    sequence: int
+    started_at: float
+    finished_at: float
+    local: bool
+    command: str
+    command_arguments: list[str]
+    venues: list[str]
+    manager: str | None
+    returncode: int
+    job_id: int | None
+    run_name: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sequence": self.sequence,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "local": self.local,
+            "command": self.command,
+            "command_arguments": list(self.command_arguments),
+            "venues": list(self.venues),
+            "manager": self.manager,
+            "returncode": self.returncode,
+            "job_id": self.job_id,
+            "run_name": self.run_name,
+        }
+
+
 class CommandExecutionError(RuntimeError):
     """Raised when submit protocol execution fails."""
 
@@ -421,6 +455,9 @@ class NanoHUBSubmitClient:
         self.verbose_stream = verbose_stream
         self.local_fast_path = local_fast_path
         self.client_version = _resolve_client_version()
+        self._catalog_cache: "SubmitCatalog | None" = None
+        self._run_history: list[SimulationRunRecord] = []
+        self._run_sequence = 0
 
     def _verbose_log(self, message: str) -> None:
         if not self.verbose:
@@ -459,15 +496,24 @@ class NanoHUBSubmitClient:
     def submit(
         self, request: SubmitRequest, *, operation_timeout: float | None = None
     ) -> CommandResult:
+        started_at = time.time()
         if request.local and self.local_fast_path:
-            return self._run_local_submit(request, operation_timeout=operation_timeout)
-        args = CommandBuilder.build_submit_args(request)
-        return self._run(
-            action="submit",
-            args=args,
-            local_execution=request.local,
-            operation_timeout=operation_timeout,
+            result = self._run_local_submit(request, operation_timeout=operation_timeout)
+        else:
+            args = CommandBuilder.build_submit_args(request)
+            result = self._run(
+                action="submit",
+                args=args,
+                local_execution=request.local,
+                operation_timeout=operation_timeout,
+            )
+        self._record_submit_run(
+            request=request,
+            result=result,
+            started_at=started_at,
+            finished_at=time.time(),
         )
+        return result
 
     def status(
         self, job_ids: list[int], *, operation_timeout: float | None = None
@@ -517,7 +563,47 @@ class NanoHUBSubmitClient:
             operation_timeout=operation_timeout,
         )
 
-    def validate_submit_request(self, request: SubmitRequest) -> SubmitValidationResult:
+    def get_catalog(
+        self,
+        *,
+        refresh: bool = False,
+        include_raw_help: bool = False,
+        operation_timeout: float = 60.0,
+    ) -> "SubmitCatalog":
+        if not refresh and self._catalog_cache is not None:
+            if include_raw_help and not self._catalog_cache.raw_help:
+                pass
+            else:
+                return self._catalog_cache
+
+        from .utils import load_available_catalog
+
+        catalog = load_available_catalog(
+            self,
+            include_raw_help=include_raw_help,
+            operation_timeout=operation_timeout,
+        )
+        self._catalog_cache = catalog
+        return catalog
+
+    def invalidate_catalog_cache(self) -> None:
+        self._catalog_cache = None
+
+    def list_tracked_runs(self) -> list[SimulationRunRecord]:
+        return list(self._run_history)
+
+    def clear_tracked_runs(self) -> None:
+        self._run_history = []
+        self._run_sequence = 0
+
+    def validate_submit_request(
+        self,
+        request: SubmitRequest,
+        *,
+        check_catalog: bool = False,
+        operation_timeout: float = 60.0,
+        extra_existing_paths: list[str] | None = None,
+    ) -> SubmitValidationResult:
         checks: list[ValidationCheck] = []
         args: list[str] = []
 
@@ -562,6 +648,48 @@ class NanoHUBSubmitClient:
                     )
                 )
 
+        if request.local:
+            command_path_like = (
+                request.command.startswith(".")
+                or request.command.startswith("~")
+                or os.sep in request.command
+                or (os.altsep is not None and os.altsep in request.command)
+            )
+            if command_path_like:
+                expanded_command = os.path.expanduser(request.command)
+                if os.path.exists(expanded_command):
+                    checks.append(
+                        ValidationCheck(
+                            name="command-local-path",
+                            ok=True,
+                            severity="info",
+                            message=f"local command path exists: {request.command}",
+                        )
+                    )
+                else:
+                    checks.append(
+                        ValidationCheck(
+                            name="command-local-path",
+                            ok=False,
+                            severity="error",
+                            message=f"local command path does not exist: {request.command}",
+                        )
+                    )
+            else:
+                command_on_path = shutil.which(request.command) is not None
+                checks.append(
+                    ValidationCheck(
+                        name="command-local-which",
+                        ok=command_on_path,
+                        severity="info" if command_on_path else "error",
+                        message=(
+                            f"local command is available on PATH: {request.command}"
+                            if command_on_path
+                            else f"local command not found on PATH: {request.command}"
+                        ),
+                    )
+                )
+
         if request.local and request.venues:
             checks.append(
                 ValidationCheck(
@@ -601,6 +729,15 @@ class NanoHUBSubmitClient:
                         message=f"data file exists: {request.data_file}",
                     )
                 )
+                if os.path.isdir(request.data_file):
+                    checks.append(
+                        ValidationCheck(
+                            name="data-file-type",
+                            ok=False,
+                            severity="error",
+                            message=f"data file must be a regular file: {request.data_file}",
+                        )
+                    )
             else:
                 checks.append(
                     ValidationCheck(
@@ -631,8 +768,154 @@ class NanoHUBSubmitClient:
                     )
                 )
 
+        if extra_existing_paths:
+            for check_path in extra_existing_paths:
+                expanded_path = os.path.expanduser(check_path)
+                if os.path.exists(expanded_path):
+                    checks.append(
+                        ValidationCheck(
+                            name="extra-path",
+                            ok=True,
+                            severity="info",
+                            message=f"extra path exists: {check_path}",
+                        )
+                    )
+                else:
+                    checks.append(
+                        ValidationCheck(
+                            name="extra-path",
+                            ok=False,
+                            severity="error",
+                            message=f"extra path does not exist: {check_path}",
+                        )
+                    )
+
+        if check_catalog:
+            if request.local:
+                checks.append(
+                    ValidationCheck(
+                        name="catalog-local-skip",
+                        ok=True,
+                        severity="info",
+                        message="catalog validation skipped for local execution",
+                    )
+                )
+            else:
+                try:
+                    catalog = self.get_catalog(
+                        operation_timeout=operation_timeout
+                    )
+                except Exception as exc:
+                    checks.append(
+                        ValidationCheck(
+                            name="catalog-load",
+                            ok=False,
+                            severity="error",
+                            message=f"failed to load server catalog: {exc}",
+                        )
+                    )
+                else:
+                    if catalog.contains("tools", request.command):
+                        checks.append(
+                            ValidationCheck(
+                                name="catalog-tool",
+                                ok=True,
+                                severity="info",
+                                message=f"tool exists in catalog: {request.command}",
+                            )
+                        )
+                    else:
+                        tool_matches = catalog.filter(
+                            request.command, details=["tools"], limit=5
+                        )["tools"]
+                        suggestion_text = (
+                            ("; close matches: " + ", ".join(tool_matches))
+                            if tool_matches
+                            else ""
+                        )
+                        checks.append(
+                            ValidationCheck(
+                                name="catalog-tool",
+                                ok=False,
+                                severity="error",
+                                message=(
+                                    f"tool not found in catalog: {request.command}"
+                                    + suggestion_text
+                                ),
+                            )
+                        )
+
+                    if request.manager:
+                        manager_ok = catalog.contains("managers", request.manager)
+                        checks.append(
+                            ValidationCheck(
+                                name="catalog-manager",
+                                ok=manager_ok,
+                                severity="info" if manager_ok else "error",
+                                message=(
+                                    f"manager exists in catalog: {request.manager}"
+                                    if manager_ok
+                                    else f"manager not found in catalog: {request.manager}"
+                                ),
+                            )
+                        )
+
+                    for venue in request.venues:
+                        venue_ok = catalog.contains("venues", venue)
+                        checks.append(
+                            ValidationCheck(
+                                name="catalog-venue",
+                                ok=venue_ok,
+                                severity="info" if venue_ok else "error",
+                                message=(
+                                    f"venue exists in catalog: {venue}"
+                                    if venue_ok
+                                    else f"venue not found in catalog: {venue}"
+                                ),
+                            )
+                        )
+
         ok = all(check.severity != "error" for check in checks)
         return SubmitValidationResult(ok=ok, args=args, checks=checks)
+
+    def preflight_submit_request(
+        self,
+        request: SubmitRequest,
+        *,
+        operation_timeout: float = 60.0,
+        extra_existing_paths: list[str] | None = None,
+    ) -> SubmitValidationResult:
+        return self.validate_submit_request(
+            request,
+            check_catalog=not request.local,
+            operation_timeout=operation_timeout,
+            extra_existing_paths=extra_existing_paths,
+        )
+
+    def _record_submit_run(
+        self,
+        *,
+        request: SubmitRequest,
+        result: CommandResult,
+        started_at: float,
+        finished_at: float,
+    ) -> None:
+        self._run_sequence += 1
+        self._run_history.append(
+            SimulationRunRecord(
+                sequence=self._run_sequence,
+                started_at=started_at,
+                finished_at=finished_at,
+                local=request.local,
+                command=request.command,
+                command_arguments=list(request.command_arguments),
+                venues=list(request.venues),
+                manager=request.manager,
+                returncode=result.returncode,
+                job_id=result.job_id,
+                run_name=result.run_name,
+            )
+        )
 
     def doctor(self, *, probe_server: bool = True) -> DoctorReport:
         checks: list[ValidationCheck] = []
