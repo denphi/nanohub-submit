@@ -18,11 +18,12 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TextIO, TYPE_CHECKING
+from typing import Any, Callable, TextIO, TYPE_CHECKING
 
 try:
     from importlib.metadata import PackageNotFoundError, version as package_version
@@ -125,6 +126,28 @@ def _is_stream_tty(stream: Any) -> bool:
         return bool(isatty())
     except Exception:
         return False
+
+
+def _is_jupyter_environment() -> bool:
+    """Return True when running inside a Jupyter kernel."""
+    try:
+        from IPython import get_ipython  # type: ignore
+    except Exception:
+        return False
+
+    try:
+        shell = get_ipython()
+    except Exception:
+        return False
+    if shell is None:
+        return False
+
+    shell_name = shell.__class__.__name__
+    if shell_name == "ZMQInteractiveShell":
+        return True
+
+    config = getattr(shell, "config", {})
+    return "IPKernelApp" in config
 
 
 def _format_submit_progress_line(
@@ -300,6 +323,39 @@ def _parse_parameter_status_counts(parameter_path: Path) -> dict[str, int]:
     except OSError:
         return counts
     return counts
+
+
+def _normalize_parameter_state(text: str) -> str:
+    """Normalize parameterCombinations state values to snake-case."""
+    return str(text).strip().lower().replace(" ", "_")
+
+
+def _parse_parameter_instance_states(parameter_path: Path) -> dict[int, str]:
+    """Parse per-instance states from `parameterCombinations.csv`."""
+    states: dict[int, str] = {}
+    if not parameter_path.exists():
+        return states
+
+    try:
+        with parameter_path.open("r", encoding="utf-8", newline="") as fp:
+            reader = csv.reader(fp)
+            for row in reader:
+                if not row:
+                    continue
+                if row[0].startswith("#"):
+                    continue
+                if len(row) < 2:
+                    continue
+                index_text = row[0].strip()
+                if not index_text.isdigit():
+                    continue
+                state_text = _normalize_parameter_state(row[1])
+                if not state_text:
+                    continue
+                states[int(index_text)] = state_text
+    except OSError:
+        return states
+    return states
 
 
 def _infer_session_state(
@@ -803,6 +859,295 @@ class _SessionState:
     timed_out: bool = False
 
 
+class _NotebookProgressMonitor:
+    """Best-effort Jupyter progress renderer for submit sweeps.
+
+    This monitor is optional and enabled only when:
+    - running in a Jupyter kernel
+    - `ipywidgets` is importable
+    """
+
+    def __init__(
+        self,
+        *,
+        run_name: str | None,
+        poll_interval: float,
+        max_instance_bars: int = 128,
+    ) -> None:
+        self.enabled = False
+        self.run_name = run_name
+        self.poll_interval = poll_interval if poll_interval > 0 else 2.0
+        self.max_instance_bars = max_instance_bars
+
+        self._widgets: Any = None
+        self._display: Any = None
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._poll_thread: threading.Thread | None = None
+
+        self._run_path: str | None = (
+            os.path.abspath(run_name) if run_name else None
+        )
+        self._parameter_path: Path | None = (
+            Path(self._run_path) / "parameterCombinations.csv"
+            if self._run_path is not None
+            else None
+        )
+        self._last_instance_states: dict[int, str] = {}
+
+        self._title: Any = None
+        self._summary_label: Any = None
+        self._overall_bar: Any = None
+        self._counts_label: Any = None
+        self._instances_note: Any = None
+        self._instance_box: Any = None
+        self._container: Any = None
+        self._instance_bars: dict[int, Any] = {}
+        self._instance_labels: dict[int, Any] = {}
+        self._instance_rows: dict[int, Any] = {}
+
+        if not _is_jupyter_environment():
+            return
+        try:
+            import ipywidgets as widgets  # type: ignore
+            from IPython.display import display  # type: ignore
+        except Exception:
+            return
+
+        self._widgets = widgets
+        self._display = display
+        self.enabled = True
+
+    def start(self) -> None:
+        """Render initial widgets and start background state polling."""
+        if not self.enabled:
+            return
+
+        widgets = self._widgets
+        self._title = widgets.HTML(value="<b>nanohubsubmit live progress</b>")
+        self._summary_label = widgets.Label(value="starting submit session...")
+        self._overall_bar = widgets.FloatProgress(
+            value=0.0,
+            min=0.0,
+            max=100.0,
+            description="%done",
+            bar_style="",
+            layout=widgets.Layout(width="99%"),
+        )
+        self._counts_label = widgets.Label(value="waiting for progress frames...")
+        self._instances_note = widgets.Label(value="")
+        self._instance_box = widgets.VBox([])
+        self._container = widgets.VBox(
+            [
+                self._title,
+                self._summary_label,
+                self._overall_bar,
+                self._counts_label,
+                self._instances_note,
+                self._instance_box,
+            ]
+        )
+        self._display(self._container)
+
+        if self._run_path:
+            self._summary_label.value = "tracking run directory: " + self._run_path
+
+        if self._parameter_path is not None:
+            self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
+            self._poll_thread.start()
+
+    def on_server_message(self, message: dict[str, Any]) -> None:
+        """Update UI from live submit server messages."""
+        if not self.enabled:
+            return
+
+        message_type = message.get("messageType")
+        if not isinstance(message_type, str):
+            return
+
+        if message_type == "jobId":
+            job_id = message.get("jobId")
+            if isinstance(job_id, int):
+                self._set_summary("submit launched (job_id=%d)" % job_id)
+            return
+
+        if message_type == "writeStdout":
+            text = message.get("text")
+            if not isinstance(text, str) or not text:
+                return
+            updates = _parse_submit_progress_lines(text)
+            for update in updates:
+                self._apply_progress_update(update)
+            return
+
+        if message_type == "serverExit":
+            exit_code = message.get("exitCode")
+            if isinstance(exit_code, int):
+                self._set_summary("submit server exited with code %d" % exit_code)
+            return
+
+    def finish(
+        self,
+        *,
+        result: CommandResult | None,
+        error: Exception | None,
+    ) -> None:
+        """Finalize widget state after submit returns or raises."""
+        if not self.enabled:
+            return
+
+        self._stop_event.set()
+        if self._poll_thread and self._poll_thread.is_alive():
+            self._poll_thread.join(timeout=min(1.0, self.poll_interval + 0.1))
+
+        self._refresh_from_parameter_file()
+
+        if error is not None:
+            self._set_summary("submit failed: %s" % error)
+            return
+        if result is None:
+            self._set_summary("submit ended without result")
+            return
+
+        if result.timed_out:
+            self._set_summary(
+                "submit timed out (job_id=%s)" % (result.job_id if result.job_id else "n/a")
+            )
+            return
+        if result.returncode == 0:
+            self._set_summary(
+                "submit completed (job_id=%s)" % (result.job_id if result.job_id else "n/a")
+            )
+            if self._overall_bar is not None:
+                self._overall_bar.value = 100.0
+                self._overall_bar.bar_style = "success"
+            return
+
+        self._set_summary("submit exited with returncode=%d" % result.returncode)
+
+    def _set_summary(self, text: str) -> None:
+        if self._summary_label is None:
+            return
+        self._summary_label.value = text
+
+    def _poll_loop(self) -> None:
+        while not self._stop_event.is_set():
+            self._refresh_from_parameter_file()
+            self._stop_event.wait(self.poll_interval)
+
+    def _refresh_from_parameter_file(self) -> None:
+        if self._parameter_path is None:
+            return
+        states = _parse_parameter_instance_states(self._parameter_path)
+        if not states:
+            return
+        if states == self._last_instance_states:
+            return
+        self._last_instance_states = dict(states)
+        self._apply_instance_states(states)
+
+    def _apply_progress_update(self, update: dict[str, Any]) -> None:
+        if self._overall_bar is None or self._counts_label is None:
+            return
+
+        aborted = int(update.get("aborted", 0))
+        finished = int(update.get("finished", 0))
+        failed = int(update.get("failed", 0))
+        executing = int(update.get("executing", 0))
+        waiting = int(update.get("waiting", 0))
+        setup = int(update.get("setup", 0))
+        setting_up = int(update.get("setting_up", 0))
+        total = aborted + finished + failed + executing + waiting + setup + setting_up
+        done = aborted + finished + failed
+        percent_done = update.get("percent_done")
+        if not isinstance(percent_done, (int, float)):
+            percent_done = (100.0 * float(done) / float(total)) if total > 0 else 0.0
+
+        with self._lock:
+            self._overall_bar.value = max(0.0, min(float(percent_done), 100.0))
+            if failed > 0 or aborted > 0:
+                self._overall_bar.bar_style = "danger"
+            elif float(percent_done) >= 100.0:
+                self._overall_bar.bar_style = "success"
+            elif executing > 0:
+                self._overall_bar.bar_style = "info"
+            else:
+                self._overall_bar.bar_style = ""
+            self._counts_label.value = (
+                "finished=%d failed=%d aborted=%d executing=%d waiting=%d setup=%d setting_up=%d"
+                % (finished, failed, aborted, executing, waiting, setup, setting_up)
+            )
+
+    def _apply_instance_states(self, states: dict[int, str]) -> None:
+        if self._instance_box is None or self._instances_note is None:
+            return
+
+        state_counts: dict[str, int] = {}
+        for state in states.values():
+            state_counts[state] = state_counts.get(state, 0) + 1
+
+        progress = _progress_from_status_counts(state_counts)
+        if progress is not None:
+            self._apply_progress_update(progress)
+
+        if len(states) > self.max_instance_bars:
+            self._instances_note.value = (
+                "per-instance bars suppressed (count=%d > max=%d)"
+                % (len(states), self.max_instance_bars)
+            )
+            if self._instance_box.children:
+                self._instance_box.children = tuple()
+            return
+
+        self._instances_note.value = "per-instance status (%d)" % len(states)
+        widgets = self._widgets
+        rows: list[Any] = []
+
+        for index in sorted(states):
+            state = states[index]
+            bar = self._instance_bars.get(index)
+            label = self._instance_labels.get(index)
+            row = self._instance_rows.get(index)
+
+            if bar is None:
+                bar = widgets.IntProgress(
+                    value=0,
+                    min=0,
+                    max=100,
+                    description=str(index),
+                    bar_style="",
+                    layout=widgets.Layout(width="70%"),
+                )
+                label = widgets.Label(value="")
+                row = widgets.HBox([bar, label])
+                self._instance_bars[index] = bar
+                self._instance_labels[index] = label
+                self._instance_rows[index] = row
+
+            value, bar_style = self._instance_bar_style(state)
+            bar.value = value
+            bar.bar_style = bar_style
+            label.value = state
+            rows.append(row)
+
+        self._instance_box.children = tuple(rows)
+
+    @staticmethod
+    def _instance_bar_style(state: str) -> tuple[int, str]:
+        normalized = _normalize_parameter_state(state)
+        if normalized in {"finished"}:
+            return (100, "success")
+        if normalized in {"failed", "aborted"}:
+            return (100, "danger")
+        if normalized in {"executing"}:
+            return (70, "info")
+        if normalized in {"setup", "setting_up"}:
+            return (35, "warning")
+        if normalized in {"waiting"}:
+            return (10, "")
+        return (0, "")
+
+
 # ---------------------------------------------------------------------------
 # Main public client API.
 # ---------------------------------------------------------------------------
@@ -830,6 +1175,8 @@ class NanoHUBSubmitClient:
         verbose: bool = False,
         operation_timeout: float | None = None,
         verbose_stream: TextIO | None = None,
+        jupyter_auto_progress: bool = True,
+        jupyter_progress_poll_interval: float = 2.0,
     ) -> None:
         """Initialize a submit client with optional config/auth overrides.
 
@@ -837,6 +1184,7 @@ class NanoHUBSubmitClient:
         - config/network settings control wire connection setup.
         - auth settings override discovered credentials.
         - timing options control connect/poll/keepalive behavior.
+        - jupyter options enable live progress widgets for submit sweeps.
         """
         self.config_path = config_path
         self.listen_uris_override = listen_uris
@@ -858,6 +1206,8 @@ class NanoHUBSubmitClient:
         self.verbose = verbose
         self.operation_timeout = operation_timeout
         self.verbose_stream = verbose_stream
+        self.jupyter_auto_progress = jupyter_auto_progress
+        self.jupyter_progress_poll_interval = jupyter_progress_poll_interval
         self.client_version = _resolve_client_version()
         self._catalog_cache: "SubmitCatalog | None" = None
         self._run_history: list[SimulationRunRecord] = []
@@ -899,6 +1249,25 @@ class NanoHUBSubmitClient:
             summary += " (" + ", ".join(details) + ")"
         self._verbose_log(summary)
 
+    def _maybe_create_notebook_progress_monitor(
+        self, request: SubmitRequest
+    ) -> _NotebookProgressMonitor | None:
+        """Create Jupyter monitor for submit progress when available/enabled."""
+        if not self.jupyter_auto_progress:
+            return None
+        if request.progress != ProgressMode.SUBMIT:
+            return None
+        if not _is_jupyter_environment():
+            return None
+
+        monitor = _NotebookProgressMonitor(
+            run_name=request.run_name,
+            poll_interval=self.jupyter_progress_poll_interval,
+        )
+        if not monitor.enabled:
+            return None
+        return monitor
+
     def submit(
         self, request: SubmitRequest, *, operation_timeout: float | None = None
     ) -> CommandResult:
@@ -907,18 +1276,47 @@ class NanoHUBSubmitClient:
         Local requests run through the local fast path. Remote requests use the
         submit wire protocol.
         """
+        if request.run_name:
+            run_path = os.path.abspath(request.run_name)
+            if os.path.exists(run_path):
+                raise CommandExecutionError(
+                    "run_name '%s' is already in use at %s" % (request.run_name, run_path)
+                )
+
+        monitor = self._maybe_create_notebook_progress_monitor(request)
+        if monitor is not None:
+            monitor.start()
+
         started_at = time.time()
         submitted_from = os.getcwd()
-        if request.local:
-            result = self._run_local_submit(request, operation_timeout=operation_timeout)
-        else:
-            args = CommandBuilder.build_submit_args(request)
-            result = self._run(
-                action="submit",
-                args=args,
-                local_execution=request.local,
-                operation_timeout=operation_timeout,
-            )
+        result: CommandResult | None = None
+        error: Exception | None = None
+        try:
+            if request.local:
+                result = self._run_local_submit(
+                    request, operation_timeout=operation_timeout
+                )
+            else:
+                args = CommandBuilder.build_submit_args(request)
+                result = self._run(
+                    action="submit",
+                    args=args,
+                    local_execution=request.local,
+                    operation_timeout=operation_timeout,
+                    progress_callback=(
+                        monitor.on_server_message if monitor is not None else None
+                    ),
+                )
+        except Exception as exc:
+            error = exc
+            raise
+        finally:
+            if monitor is not None:
+                monitor.finish(result=result, error=error)
+
+        if result is None:
+            raise CommandExecutionError("submit ended without a result")
+
         self._record_submit_run(
             request=request,
             result=result,
@@ -1176,6 +1574,29 @@ class NanoHUBSubmitClient:
                         ok=False,
                         severity="error",
                         message="run_name must be alphanumeric to match submit server rules",
+                    )
+                )
+
+            run_path = os.path.abspath(request.run_name)
+            if os.path.exists(run_path):
+                checks.append(
+                    ValidationCheck(
+                        name="run-name-availability",
+                        ok=False,
+                        severity="error",
+                        message=(
+                            "run_name is already in use (path exists): "
+                            + run_path
+                        ),
+                    )
+                )
+            else:
+                checks.append(
+                    ValidationCheck(
+                        name="run-name-availability",
+                        ok=True,
+                        severity="info",
+                        message="run_name path is available: " + run_path,
                     )
                 )
 
@@ -2155,6 +2576,7 @@ class NanoHUBSubmitClient:
         args: list[str],
         local_execution: bool,
         operation_timeout: float | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> CommandResult:
         """Execute one full wire-protocol submit action and collect result."""
         effective_timeout = (
@@ -2243,6 +2665,11 @@ class NanoHUBSubmitClient:
 
                 self._trace_message("<-", server_message)
                 state.server_messages.append(server_message)
+                if progress_callback is not None:
+                    try:
+                        progress_callback(server_message)
+                    except Exception:
+                        pass
                 outbound_messages = self._process_server_message(
                     conn=conn,
                     state=state,

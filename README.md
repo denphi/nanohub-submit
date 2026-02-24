@@ -109,6 +109,9 @@ With `run_name="echotest"` this creates `echotest/` with
 `parameterCombinations.csv`, per-instance subdirectories (`01`, `02`, ...), and
 `echotest_XX.stdout` files.
 
+`run_name` must be unique in the current working directory. If the path already
+exists, `client.submit(...)` raises `CommandExecutionError`.
+
 Equivalent to:
 `submit --runName=runtest --progress submit -p @@Vin=1,2,3,4,5 /apps/pegtut/current/examples/capacitor_voltage/sim1.py --Vin @@Vin`
 
@@ -158,6 +161,14 @@ if hasattr(client, "monitor_tracked_runs"):
             print("latest_progress:", item["latest_progress"])
             break
 ```
+
+In Jupyter, this submit pattern (`run_name` + `progress=submit`) automatically
+shows live `ipywidgets` progress bars while the call is running:
+- overall submit progress from `=SUBMIT-PROGRESS=>` frames
+- per-instance bars from `parameterCombinations.csv`
+
+Disable this behavior with:
+`NanoHUBSubmitClient(jupyter_auto_progress=False)`.
 
 ## Metadata utilities
 

@@ -13,6 +13,7 @@ from nanohubsubmit.client import (
     AuthenticationError,
     CommandExecutionError,
     NanoHUBSubmitClient,
+    _parse_parameter_instance_states,
     _is_stream_tty,
 )
 from nanohubsubmit.models import ProgressMode, SubmitRequest
@@ -275,6 +276,22 @@ def test_stream_tty_helper_handles_missing_closed_attr() -> None:
 
 def test_stream_tty_helper_handles_broken_isatty() -> None:
     assert _is_stream_tty(_BrokenTTY()) is False
+
+
+def test_parse_parameter_instance_states_extracts_indexed_states(tmp_path: Path) -> None:
+    parameter_file = tmp_path / "parameterCombinations.csv"
+    parameter_file.write_text(
+        "instance,status\n"
+        "1,waiting\n"
+        "2,executing\n"
+        "3,finished\n"
+        "#comment,row\n"
+        "x,ignored\n",
+        encoding="utf-8",
+    )
+
+    states = _parse_parameter_instance_states(parameter_file)
+    assert states == {1: "waiting", 2: "executing", 3: "finished"}
 
 
 def test_client_status_uses_socket_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -584,6 +601,23 @@ def test_client_submit_local_fast_path_timeout() -> None:
         )
 
 
+def test_client_submit_raises_when_run_name_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "runtest").mkdir()
+    client = _make_client()
+    with pytest.raises(CommandExecutionError, match="run_name 'runtest' is already in use"):
+        client.submit(
+            SubmitRequest(
+                command="echo",
+                command_arguments=["hello"],
+                run_name="runtest",
+                venues=["workspace"],
+            )
+        )
+
+
 def test_client_submit_local_parameter_sweep_submit_progress(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -693,6 +727,7 @@ def test_client_catalog_is_loaded_on_demand_and_cached(
 def test_validate_submit_request_catalog_and_extra_paths(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     client = _make_client()
     catalog = SubmitCatalog(
         tools=["abacus", "gem5"],
@@ -731,8 +766,10 @@ def test_validate_submit_request_catalog_and_extra_paths(
         command="missing-tool",
         venues=["missing-venue"],
         manager="missing-manager",
+        run_name="existingrun",
         input_files=[str(input_file)],
     )
+    (tmp_path / "existingrun").mkdir()
     bad_validation = client.validate_submit_request(
         bad_request,
         check_catalog=True,
@@ -744,3 +781,4 @@ def test_validate_submit_request_catalog_and_extra_paths(
     assert any("manager not found in catalog" in message for message in messages)
     assert any("venue not found in catalog" in message for message in messages)
     assert any("extra path does not exist" in message for message in messages)
+    assert any("run_name is already in use" in message for message in messages)
