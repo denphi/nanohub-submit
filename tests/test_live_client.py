@@ -73,7 +73,10 @@ def test_live_submit_local_ls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert result.returncode == 0, result.to_dict()
 
 
-def test_live_submit_local_parameter_sweep_submit_progress() -> None:
+def test_live_submit_local_parameter_sweep_submit_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
     client = _make_live_client()
     result = client.submit(
         SubmitRequest(
@@ -95,3 +98,9 @@ def test_live_submit_local_parameter_sweep_submit_progress() -> None:
     ]
     assert progress_lines, result.to_dict()
     assert any("%done=100.00" in line for line in progress_lines), result.to_dict()
+    run_path = tmp_path / "echotest"
+    assert run_path.is_dir()
+    assert (run_path / "parameterCombinations.csv").is_file()
+    assert (run_path / "01" / "echotest_01.stdout").is_file()
+    assert (run_path / "02" / "echotest_02.stdout").is_file()
+    assert (run_path / "03" / "echotest_03.stdout").is_file()

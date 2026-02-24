@@ -183,6 +183,11 @@ def _apply_substitutions(text: str, substitutions: dict[str, str]) -> str:
     return rendered
 
 
+def _write_text_file(path: str, text: str) -> None:
+    with open(path, "w", encoding="utf-8") as fp:
+        fp.write(text)
+
+
 def _discover_mount_device(path: str) -> str:
     try:
         proc = subprocess.run(
@@ -1434,6 +1439,51 @@ class NanoHUBSubmitClient:
         stderr_chunks: list[str] = []
         last_returncode = 0
         started_at = time.time()
+        run_name = request.run_name
+        run_path: str | None = None
+        per_instance = total_runs > 1
+        parameter_names = (
+            list(parameter_combinations[0].keys()) if parameter_combinations else []
+        )
+
+        if run_name:
+            run_path = os.path.abspath(run_name)
+            try:
+                os.makedirs(run_path, exist_ok=True)
+                synthetic_job_id = str(int(time.time()))
+                metadata_lines = [
+                    "run_name: %s" % run_name,
+                    "job_id: %s" % synthetic_job_id,
+                    "mode: local-fast-path",
+                    "created_at: %.1f" % started_at,
+                    "command: %s" % request.command,
+                    "arguments: %s" % " ".join(list(request.command_arguments)),
+                ]
+                _write_text_file(
+                    os.path.join(run_path, "%s.yml" % synthetic_job_id),
+                    "\n".join(metadata_lines) + "\n",
+                )
+                if per_instance:
+                    with open(
+                        os.path.join(run_path, "parameterCombinations.csv"),
+                        "w",
+                        newline="",
+                        encoding="utf-8",
+                    ) as fp:
+                        writer = csv.writer(fp)
+                        writer.writerow(["instance"] + list(parameter_names))
+                        for instance_index, substitutions in enumerate(
+                            parameter_combinations, start=1
+                        ):
+                            writer.writerow(
+                                [instance_index]
+                                + [
+                                    substitutions.get(parameter_name, "")
+                                    for parameter_name in parameter_names
+                                ]
+                            )
+            except OSError as exc:
+                raise CommandExecutionError(str(exc)) from exc
 
         self._verbose_log(
             "starting local-fast-path command=%s sweeps=%d"
@@ -1456,7 +1506,7 @@ class NanoHUBSubmitClient:
                 + "\n"
             )
 
-        for substitutions in parameter_combinations:
+        for instance_index, substitutions in enumerate(parameter_combinations, start=1):
             command = [
                 _apply_substitutions(request.command, substitutions),
                 *[
@@ -1469,6 +1519,27 @@ class NanoHUBSubmitClient:
                 if value is None:
                     continue
                 env[str(key)] = _apply_substitutions(str(value), substitutions)
+
+            stdout_file_path: str | None = None
+            stderr_file_path: str | None = None
+            if run_path:
+                if per_instance:
+                    n_digits = max(2, len(str(total_runs)))
+                    instance_id = str(instance_index).zfill(n_digits)
+                    instance_dir = os.path.join(run_path, instance_id)
+                    try:
+                        os.makedirs(instance_dir, exist_ok=True)
+                    except OSError as exc:
+                        raise CommandExecutionError(str(exc)) from exc
+                    stdout_file_path = os.path.join(
+                        instance_dir, "%s_%s.stdout" % (run_name, instance_id)
+                    )
+                    stderr_file_path = os.path.join(
+                        instance_dir, "%s_%s.stderr" % (run_name, instance_id)
+                    )
+                else:
+                    stdout_file_path = os.path.join(run_path, "%s.stdout" % run_name)
+                    stderr_file_path = os.path.join(run_path, "%s.stderr" % run_name)
 
             started_runs += 1
             if progress_submit:
@@ -1518,6 +1589,20 @@ class NanoHUBSubmitClient:
                 stdout_chunks.append(completed.stdout)
             if completed.stderr:
                 stderr_chunks.append(completed.stderr)
+
+            if stdout_file_path:
+                try:
+                    _write_text_file(stdout_file_path, completed.stdout)
+                except OSError as exc:
+                    raise CommandExecutionError(str(exc)) from exc
+            if stderr_file_path:
+                try:
+                    if completed.stderr:
+                        _write_text_file(stderr_file_path, completed.stderr)
+                    elif os.path.exists(stderr_file_path):
+                        os.remove(stderr_file_path)
+                except OSError as exc:
+                    raise CommandExecutionError(str(exc)) from exc
 
             last_returncode = int(completed.returncode)
             if last_returncode == 0:

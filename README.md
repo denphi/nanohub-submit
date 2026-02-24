@@ -98,6 +98,10 @@ print(result.returncode)
 print(result.stdout)
 ```
 
+With `run_name="echotest"` this creates `echotest/` with
+`parameterCombinations.csv`, per-instance subdirectories (`01`, `02`, ...), and
+`echotest_XX.stdout` files.
+
 ## Metadata utilities
 
 ```python

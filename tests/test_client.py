@@ -473,7 +473,10 @@ def test_client_submit_local_fast_path_timeout() -> None:
         )
 
 
-def test_client_submit_local_parameter_sweep_submit_progress() -> None:
+def test_client_submit_local_parameter_sweep_submit_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
     client = _make_client(local_fast_path=False)
     result = client.submit(
         SubmitRequest(
@@ -484,6 +487,7 @@ def test_client_submit_local_parameter_sweep_submit_progress() -> None:
                 "@@name",
             ],
             local=True,
+            run_name="echotest",
             separator=",",
             parameters=["@@name=hub1,hub2,hub3"],
             progress=ProgressMode.SUBMIT,
@@ -501,6 +505,12 @@ def test_client_submit_local_parameter_sweep_submit_progress() -> None:
     assert "hub1" in result.stdout
     assert "hub2" in result.stdout
     assert "hub3" in result.stdout
+    run_path = tmp_path / "echotest"
+    assert run_path.is_dir()
+    assert (run_path / "parameterCombinations.csv").is_file()
+    assert (run_path / "01" / "echotest_01.stdout").is_file()
+    assert (run_path / "02" / "echotest_02.stdout").is_file()
+    assert (run_path / "03" / "echotest_03.stdout").is_file()
 
 
 def test_client_catalog_is_loaded_on_demand_and_cached(
