@@ -78,6 +78,8 @@ _STATUS_DONE_STATES = {"finished", "failed", "aborted"}
 _JOB_ID_MARKER = re.compile(
     r"^\.__(?:timestamp_[a-z]+|time_results|exit_code)\.(\d+)_\d+$"
 )
+_PROGRESS_LINE_RE = re.compile(r"^=SUBMIT-PROGRESS=>\s+(.*)$")
+_PROGRESS_KV_RE = re.compile(r"([A-Za-z_%][A-Za-z0-9_%]*)=([^\s]+)")
 
 
 # ---------------------------------------------------------------------------
@@ -310,9 +312,14 @@ def _infer_session_state(
     if any(status_counts.get(state, 0) > 0 for state in _STATUS_RUNNING_STATES):
         return "running"
     if status_counts:
-        total = sum(status_counts.values())
+        total = sum(
+            status_counts.get(state, 0)
+            for state in (_STATUS_RUNNING_STATES | _STATUS_DONE_STATES)
+        )
+        if total <= 0:
+            return "unknown"
         done = sum(status_counts.get(state, 0) for state in _STATUS_DONE_STATES)
-        if done == total and total > 0:
+        if done == total:
             return "complete"
         return "mixed"
     if saw_start_marker and not saw_finish_marker:
@@ -320,6 +327,201 @@ def _infer_session_state(
     if saw_finish_marker:
         return "complete_maybe"
     return "unknown"
+
+
+def _parse_submit_progress_lines(text: str) -> list[dict[str, Any]]:
+    """Extract submit progress snapshots from stdout text."""
+    updates: list[dict[str, Any]] = []
+    if not text:
+        return updates
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = _PROGRESS_LINE_RE.match(line)
+        if not match:
+            continue
+        kv_pairs = dict(_PROGRESS_KV_RE.findall(match.group(1)))
+
+        update: dict[str, Any] = {
+            "raw_line": line,
+            "aborted": 0,
+            "finished": 0,
+            "failed": 0,
+            "executing": 0,
+            "waiting": 0,
+            "setup": 0,
+            "setting_up": 0,
+        }
+        for key in (
+            "aborted",
+            "finished",
+            "failed",
+            "executing",
+            "waiting",
+            "setup",
+            "setting_up",
+        ):
+            raw_value = kv_pairs.get(key)
+            if raw_value is None:
+                continue
+            try:
+                update[key] = int(raw_value)
+            except (TypeError, ValueError):
+                continue
+
+        if "%done" in kv_pairs:
+            try:
+                update["percent_done"] = float(kv_pairs["%done"])
+            except (TypeError, ValueError):
+                pass
+        if "timestamp" in kv_pairs:
+            try:
+                update["timestamp"] = float(kv_pairs["timestamp"])
+            except (TypeError, ValueError):
+                pass
+
+        updates.append(update)
+    return updates
+
+
+def _progress_from_status_counts(status_counts: dict[str, int]) -> dict[str, Any] | None:
+    """Build a progress-like snapshot from parameter status counters."""
+    if not status_counts:
+        return None
+
+    total = sum(
+        status_counts.get(state, 0) for state in (_STATUS_RUNNING_STATES | _STATUS_DONE_STATES)
+    )
+    if total <= 0:
+        return None
+
+    finished = int(status_counts.get("finished", 0))
+    failed = int(status_counts.get("failed", 0))
+    aborted = int(status_counts.get("aborted", 0))
+    executing = int(status_counts.get("executing", 0))
+    waiting = int(status_counts.get("waiting", 0))
+    setup = int(status_counts.get("setup", 0))
+    setting_up = int(status_counts.get("setting_up", 0))
+    done = finished + failed + aborted
+    percent_done = (100.0 * float(done) / float(total)) if total > 0 else 100.0
+    return {
+        "aborted": aborted,
+        "finished": finished,
+        "failed": failed,
+        "executing": executing,
+        "waiting": waiting,
+        "setup": setup,
+        "setting_up": setting_up,
+        "percent_done": percent_done,
+        "source": "parameterCombinations.csv",
+    }
+
+
+def _merge_progress_snapshot(
+    current: dict[str, Any] | None, candidate: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Pick the more informative progress snapshot between two candidates."""
+    if current is None:
+        return dict(candidate) if candidate is not None else None
+    if candidate is None:
+        return dict(current)
+
+    current_percent = current.get("percent_done")
+    candidate_percent = candidate.get("percent_done")
+    if isinstance(candidate_percent, (int, float)):
+        if not isinstance(current_percent, (int, float)):
+            return dict(candidate)
+        if float(candidate_percent) >= float(current_percent):
+            return dict(candidate)
+    return dict(current)
+
+
+def _extract_message_ids(payload: Any) -> list[int]:
+    """Extract integer IDs from nested message payloads."""
+    extracted: list[int] = []
+
+    if isinstance(payload, bool):
+        return extracted
+
+    if isinstance(payload, int):
+        return [payload]
+
+    if isinstance(payload, str):
+        stripped = payload.strip()
+        if stripped.isdigit():
+            try:
+                return [int(stripped)]
+            except ValueError:
+                return []
+        return []
+
+    if isinstance(payload, list):
+        for item in payload:
+            extracted.extend(_extract_message_ids(item))
+        return extracted
+
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            key_text = str(key).strip().lower()
+            if (
+                key_text.endswith("id")
+                or key_text.endswith("ids")
+                or key_text in {"sessions", "createdsessions", "jobs", "runs"}
+            ):
+                extracted.extend(_extract_message_ids(value))
+            elif isinstance(value, (dict, list)):
+                extracted.extend(_extract_message_ids(value))
+        return extracted
+
+    return extracted
+
+
+def _unique_ints(values: list[int]) -> list[int]:
+    """Return stable-order unique integer list."""
+    output: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        output.append(value)
+    return output
+
+
+def _derive_tracked_run_state(
+    *,
+    run: "SimulationRunRecord",
+    local_session: "LocalSessionInfo | None",
+    latest_progress: dict[str, Any] | None,
+) -> str:
+    """Infer current tracked-run state from run metadata and progress/session info."""
+    if local_session is not None and local_session.inferred_state != "unknown":
+        session_state = local_session.inferred_state
+        if session_state in {"running", "running_maybe"}:
+            return "running"
+        if session_state in {"complete", "complete_maybe"}:
+            return "failed" if run.returncode != 0 else "complete"
+        return session_state
+
+    if latest_progress:
+        executing = int(latest_progress.get("executing", 0))
+        waiting = int(latest_progress.get("waiting", 0))
+        setup = int(latest_progress.get("setup", 0))
+        setting_up = int(latest_progress.get("setting_up", 0))
+        if executing > 0 or waiting > 0 or setup > 0 or setting_up > 0:
+            return "running"
+
+        percent_done = latest_progress.get("percent_done")
+        if isinstance(percent_done, (int, float)) and float(percent_done) >= 100.0:
+            return "failed" if run.returncode != 0 else "complete"
+
+    if run.returncode != 0:
+        return "failed"
+    if run.local:
+        return "complete"
+    return "submitted"
 
 
 @dataclass
@@ -336,6 +538,8 @@ class CommandResult:
     job_id: int | None = None
     run_name: str | None = None
     server_version: str | None = None
+    process_ids: list[int] = field(default_factory=list)
+    timed_out: bool = False
 
     @property
     def ok(self) -> bool:
@@ -490,6 +694,13 @@ class SimulationRunRecord:
     returncode: int
     job_id: int | None
     run_name: str | None
+    submitted_from: str
+    expected_run_path: str | None = None
+    progress_updates: list[dict[str, Any]] = field(default_factory=list)
+    latest_progress: dict[str, Any] | None = None
+    status_counts: dict[str, int] = field(default_factory=dict)
+    process_ids: list[int] = field(default_factory=list)
+    timed_out: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize run tracking record."""
@@ -505,6 +716,61 @@ class SimulationRunRecord:
             "returncode": self.returncode,
             "job_id": self.job_id,
             "run_name": self.run_name,
+            "submitted_from": self.submitted_from,
+            "expected_run_path": self.expected_run_path,
+            "progress_updates": [dict(item) for item in self.progress_updates],
+            "latest_progress": (
+                dict(self.latest_progress) if self.latest_progress is not None else None
+            ),
+            "status_counts": dict(self.status_counts),
+            "process_ids": list(self.process_ids),
+            "timed_out": self.timed_out,
+        }
+
+
+@dataclass
+class TrackedRunStatus:
+    """Merged run tracking item combining run history and discovered session info."""
+
+    run: SimulationRunRecord
+    local_session: LocalSessionInfo | None = None
+    latest_progress: dict[str, Any] | None = None
+    derived_state: str = "unknown"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize merged tracked-run status payload."""
+        return {
+            "run": self.run.to_dict(),
+            "local_session": (
+                self.local_session.to_dict() if self.local_session is not None else None
+            ),
+            "latest_progress": (
+                dict(self.latest_progress) if self.latest_progress is not None else None
+            ),
+            "derived_state": self.derived_state,
+        }
+
+
+@dataclass
+class TrackedRunsReport:
+    """Collection of tracked runs with optional live status probe."""
+
+    runs: list[TrackedRunStatus]
+    job_ids: list[int]
+    live_probe: SessionStatusProbe | None = None
+
+    @property
+    def ok(self) -> bool:
+        """True when live probe is absent or succeeded."""
+        return self.live_probe is None or self.live_probe.ok
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize monitor report with nested tracking payloads."""
+        return {
+            "ok": self.ok,
+            "runs": [run.to_dict() for run in self.runs],
+            "job_ids": list(self.job_ids),
+            "live_probe": self.live_probe.to_dict() if self.live_probe else None,
         }
 
 
@@ -529,10 +795,12 @@ class _SessionState:
     server_id_hex: str | None = None
     server_version: str | None = None
     job_id: int | None = None
+    process_ids: list[int] = field(default_factory=list)
     run_name: str | None = None
     stdout_chunks: list[str] = field(default_factory=list)
     stderr_chunks: list[str] = field(default_factory=list)
     server_messages: list[dict[str, Any]] = field(default_factory=list)
+    timed_out: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -562,7 +830,6 @@ class NanoHUBSubmitClient:
         verbose: bool = False,
         operation_timeout: float | None = None,
         verbose_stream: TextIO | None = None,
-        local_fast_path: bool = True,
     ) -> None:
         """Initialize a submit client with optional config/auth overrides.
 
@@ -591,7 +858,6 @@ class NanoHUBSubmitClient:
         self.verbose = verbose
         self.operation_timeout = operation_timeout
         self.verbose_stream = verbose_stream
-        self.local_fast_path = local_fast_path
         self.client_version = _resolve_client_version()
         self._catalog_cache: "SubmitCatalog | None" = None
         self._run_history: list[SimulationRunRecord] = []
@@ -642,11 +908,8 @@ class NanoHUBSubmitClient:
         submit wire protocol.
         """
         started_at = time.time()
+        submitted_from = os.getcwd()
         if request.local:
-            if not self.local_fast_path:
-                self._verbose_log(
-                    "local submit protocol is not fully implemented; using local-fast-path"
-                )
             result = self._run_local_submit(request, operation_timeout=operation_timeout)
         else:
             args = CommandBuilder.build_submit_args(request)
@@ -661,6 +924,7 @@ class NanoHUBSubmitClient:
             result=result,
             started_at=started_at,
             finished_at=time.time(),
+            submitted_from=submitted_from,
         )
         return result
 
@@ -752,6 +1016,111 @@ class NanoHUBSubmitClient:
         """Clear tracked submit run history for current client instance."""
         self._run_history = []
         self._run_sequence = 0
+
+    def monitor_tracked_runs(
+        self,
+        *,
+        root: str | Path = ".",
+        max_depth: int = 3,
+        include_live_status: bool = False,
+        operation_timeout: float | None = None,
+    ) -> TrackedRunsReport:
+        """Merge tracked submit history with local session discovery.
+
+        This helps monitor long-running parameter sweeps by combining:
+        - in-memory submit calls made by this client
+        - discovered run directories and `parameterCombinations.csv` status
+        - optional live `submit --status` for tracked job IDs
+        """
+        sessions_report = self.list_sessions(
+            root=root,
+            max_depth=max_depth,
+            include_live_status=False,
+            limit=None,
+        )
+        sessions_by_path: dict[str, LocalSessionInfo] = {
+            os.path.abspath(session.path): session for session in sessions_report.sessions
+        }
+        sessions_by_name: dict[str, list[LocalSessionInfo]] = {}
+        for session in sessions_report.sessions:
+            sessions_by_name.setdefault(session.run_name, []).append(session)
+        for candidates in sessions_by_name.values():
+            candidates.sort(key=lambda item: item.last_updated, reverse=True)
+
+        runs: list[TrackedRunStatus] = []
+        tracked_job_ids: set[int] = set()
+
+        for run in self._run_history:
+            local_session: LocalSessionInfo | None = None
+            if run.expected_run_path:
+                local_session = sessions_by_path.get(os.path.abspath(run.expected_run_path))
+            if local_session is None and run.run_name:
+                run_name_candidates = sessions_by_name.get(run.run_name, [])
+                if run_name_candidates:
+                    local_session = run_name_candidates[0]
+
+            latest_progress = (
+                dict(run.latest_progress) if run.latest_progress is not None else None
+            )
+            if local_session is not None:
+                local_progress = _progress_from_status_counts(local_session.status_counts)
+                if local_progress is not None:
+                    local_progress["timestamp"] = local_session.last_updated
+                latest_progress = _merge_progress_snapshot(latest_progress, local_progress)
+
+            runs.append(
+                TrackedRunStatus(
+                    run=run,
+                    local_session=local_session,
+                    latest_progress=latest_progress,
+                    derived_state=_derive_tracked_run_state(
+                        run=run,
+                        local_session=local_session,
+                        latest_progress=latest_progress,
+                    ),
+                )
+            )
+            if run.process_ids:
+                for process_id in run.process_ids:
+                    tracked_job_ids.add(process_id)
+            elif run.job_id is not None:
+                tracked_job_ids.add(run.job_id)
+
+        sorted_job_ids = sorted(tracked_job_ids)
+        live_probe: SessionStatusProbe | None = None
+        if include_live_status:
+            if sorted_job_ids:
+                try:
+                    status_result = self.status(
+                        sorted_job_ids,
+                        operation_timeout=operation_timeout,
+                    )
+                except Exception as exc:
+                    live_probe = SessionStatusProbe(
+                        job_ids=sorted_job_ids,
+                        error=str(exc),
+                    )
+                else:
+                    live_probe = SessionStatusProbe(
+                        job_ids=sorted_job_ids,
+                        returncode=status_result.returncode,
+                        stdout=status_result.stdout,
+                        stderr=status_result.stderr,
+                    )
+            else:
+                live_probe = SessionStatusProbe(
+                    job_ids=[],
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                    error=None,
+                )
+
+        return TrackedRunsReport(
+            runs=runs,
+            job_ids=sorted_job_ids,
+            live_probe=live_probe,
+        )
 
     def validate_submit_request(
         self,
@@ -1065,9 +1434,35 @@ class NanoHUBSubmitClient:
         result: CommandResult,
         started_at: float,
         finished_at: float,
+        submitted_from: str,
     ) -> None:
         """Append one run-history record after every submit invocation."""
         self._run_sequence += 1
+        expected_run_path: str | None = None
+        if request.run_name:
+            expected_run_path = os.path.abspath(
+                os.path.join(submitted_from, request.run_name)
+            )
+
+        progress_updates = _parse_submit_progress_lines(result.stdout)
+        latest_progress = progress_updates[-1] if progress_updates else None
+        status_counts: dict[str, int] = {}
+        process_ids: list[int] = []
+
+        if expected_run_path:
+            parameter_path = Path(expected_run_path) / "parameterCombinations.csv"
+            status_counts = _parse_parameter_status_counts(parameter_path)
+            file_progress = _progress_from_status_counts(status_counts)
+            if file_progress is not None:
+                file_progress["timestamp"] = finished_at
+            latest_progress = _merge_progress_snapshot(latest_progress, file_progress)
+
+        if result.process_ids:
+            process_ids.extend(result.process_ids)
+        if result.job_id is not None:
+            process_ids.append(result.job_id)
+        process_ids = _unique_ints(process_ids)
+
         self._run_history.append(
             SimulationRunRecord(
                 sequence=self._run_sequence,
@@ -1081,6 +1476,15 @@ class NanoHUBSubmitClient:
                 returncode=result.returncode,
                 job_id=result.job_id,
                 run_name=result.run_name,
+                submitted_from=submitted_from,
+                expected_run_path=expected_run_path,
+                progress_updates=[dict(item) for item in progress_updates],
+                latest_progress=(
+                    dict(latest_progress) if latest_progress is not None else None
+                ),
+                status_counts=status_counts,
+                process_ids=process_ids,
+                timed_out=result.timed_out,
             )
         )
 
@@ -1800,10 +2204,33 @@ class NanoHUBSubmitClient:
                     effective_timeout is not None
                     and time.time() - started_at >= effective_timeout
                 ):
-                    raise CommandExecutionError(
-                        "timed out waiting for %s response after %.1fs"
-                        % (action, effective_timeout)
+                    timeout_message = "timed out waiting for %s response after %.1fs" % (
+                        action,
+                        effective_timeout,
                     )
+                    launched_submit = (
+                        action == "submit"
+                        and (
+                            state.job_id is not None
+                            or bool(state.process_ids)
+                            or state.run_name is not None
+                        )
+                    )
+                    if launched_submit:
+                        state.timed_out = True
+                        state.exit_code = 124
+                        state.stderr_chunks.append(timeout_message + "\n")
+                        state.server_messages.append(
+                            {
+                                "messageType": "timeout",
+                                "text": timeout_message,
+                            }
+                        )
+                        self._verbose_log(
+                            "timeout reached after launch; returning partial submit result"
+                        )
+                        break
+                    raise CommandExecutionError(timeout_message)
 
                 server_message = conn.receive_json(timeout=self.idle_timeout)
                 if server_message is None:
@@ -1854,6 +2281,8 @@ class NanoHUBSubmitClient:
             job_id=state.job_id,
             run_name=state.run_name,
             server_version=state.server_version,
+            process_ids=_unique_ints(list(state.process_ids)),
+            timed_out=state.timed_out,
         )
         self._verbose_log(
             "finished action=%s returncode=%d job_id=%s run_name=%s"
@@ -1984,6 +2413,7 @@ class NanoHUBSubmitClient:
             job_id = message.get("jobId")
             if isinstance(job_id, int):
                 state.job_id = job_id
+                state.process_ids = _unique_ints([*state.process_ids, job_id])
             return []
 
         if message_type == "runName":
@@ -1993,6 +2423,13 @@ class NanoHUBSubmitClient:
             job_id = message.get("jobId")
             if isinstance(job_id, int):
                 state.job_id = job_id
+                state.process_ids = _unique_ints([*state.process_ids, job_id])
+            return []
+
+        if message_type == "createdSessions":
+            state.process_ids = _unique_ints(
+                [*state.process_ids, *_extract_message_ids(message)]
+            )
             return []
 
         # Authentication handshake.

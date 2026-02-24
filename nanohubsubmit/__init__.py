@@ -6,6 +6,8 @@ from .client import (
     CommandResult,
     NanoHUBSubmitClient,
     SimulationRunRecord,
+    TrackedRunStatus,
+    TrackedRunsReport,
 )
 from .models import ProgressMode, SubmitRequest
 from .utils import (
@@ -29,6 +31,8 @@ __all__ = [
     "CommandResult",
     "NanoHUBSubmitClient",
     "SimulationRunRecord",
+    "TrackedRunStatus",
+    "TrackedRunsReport",
     "ProgressMode",
     "SubmitRequest",
     "SubmitCatalog",

@@ -32,15 +32,14 @@ def _live_remote_example_command() -> str:
     return value.strip()
 
 
-def _make_live_client(local_fast_path: bool = True) -> NanoHUBSubmitClient:
+def _make_live_client() -> NanoHUBSubmitClient:
     config_path = _live_config_path()
     if config_path:
         return NanoHUBSubmitClient(
             config_path=config_path,
             verbose=True,
-            local_fast_path=local_fast_path,
         )
-    return NanoHUBSubmitClient(verbose=True, local_fast_path=local_fast_path)
+    return NanoHUBSubmitClient(verbose=True)
 
 
 pytestmark = pytest.mark.skipif(

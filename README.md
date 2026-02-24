@@ -192,11 +192,22 @@ print(validation["ok"])
 
 result = client.submit(request, operation_timeout=120.0)
 print(result.returncode, result.job_id, result.run_name)
+print(result.process_ids, result.timed_out)
 
 # Track runs during the client session:
 for run in client.list_tracked_runs():
     print(run.to_dict())
+
+# Merge tracked runs with discovered run directories and progress:
+tracking = client.monitor_tracked_runs(root=".", include_live_status=True).to_dict()
+for item in tracking["runs"]:
+    print(item["run"]["run_name"], item["derived_state"], item["latest_progress"])
 ```
+
+If a long-running remote `submit` reaches `operation_timeout` after launch, the
+client now returns a partial `CommandResult` (`returncode=124`,
+`timed_out=True`) with any known IDs in `process_ids` so you can continue
+tracking with `status(...)` or `monitor_tracked_runs(...)`.
 
 ## Jupyter Tutorial
 

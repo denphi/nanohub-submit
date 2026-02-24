@@ -227,7 +227,7 @@ class _FakeSubmitServer(threading.Thread):
             return
 
 
-def _make_client(local_fast_path: bool = True) -> NanoHUBSubmitClient:
+def _make_client() -> NanoHUBSubmitClient:
     return NanoHUBSubmitClient(
         config_path="",
         listen_uris=["tcp://example.invalid:1"],
@@ -236,7 +236,6 @@ def _make_client(local_fast_path: bool = True) -> NanoHUBSubmitClient:
         connect_timeout=2.0,
         idle_timeout=0.1,
         keepalive_interval=0.2,
-        local_fast_path=local_fast_path,
     )
 
 
@@ -322,6 +321,7 @@ def test_client_submit_drives_remote_sequence(monkeypatch: pytest.MonkeyPatch) -
     tracked = client.list_tracked_runs()
     assert len(tracked) == 1
     assert tracked[0].job_id == 42
+    assert tracked[0].process_ids == [42]
     assert tracked[0].command == "echo"
 
 
@@ -349,6 +349,117 @@ def test_client_raw_operation_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
         client.raw(["--help", "tools"], operation_timeout=0.25)
 
     _assert_server_ok(server)
+
+
+def test_client_submit_timeout_after_launch_returns_partial_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client_conn, server_conn = socket.socketpair()
+    _patch_connection(monkeypatch, client_conn)
+
+    class _SubmitHangAfterLaunchServer(_FakeSubmitServer):
+        def _run_status(self, conn: socket.socket) -> None:  # pragma: no cover - helper override
+            raise NotImplementedError
+
+        def run(self) -> None:  # noqa: D401 - helper override
+            try:
+                self.conn.settimeout(5.0)
+                handshake = b""
+                while len(handshake) < 32:
+                    chunk = self.conn.recv(32 - len(handshake))
+                    if not chunk:
+                        raise EOFError("missing handshake from client")
+                    handshake += chunk
+                self.conn.sendall("SUBMIT 1024".ljust(32).encode("utf-8"))
+
+                _send_json(
+                    self.conn, {"messageType": "serverId", "serverId": str(uuid.uuid4())}
+                )
+                _send_json(self.conn, {"messageType": "serverVersion", "version": "1.0.0"})
+
+                buffer = b""
+                while True:
+                    message, buffer = _recv_json(self.conn, buffer)
+                    message_type = str(message.get("messageType", ""))
+                    self.received_message_types.append(message_type)
+                    if message_type == "clientReadyForSignon":
+                        _send_json(self.conn, {"messageType": "serverReadyForSignon"})
+                    elif message_type == "signon":
+                        _send_json(
+                            self.conn,
+                            {
+                                "messageType": "authz",
+                                "success": True,
+                                "retry": False,
+                                "hasDistributor": True,
+                                "hasHarvester": True,
+                                "hasJobStatus": True,
+                                "hasJobKill": True,
+                                "hasVenueProbe": True,
+                            },
+                        )
+                    elif message_type == "submitCommandFileInodesSent":
+                        _send_json(self.conn, {"messageType": "noExportCommandFiles"})
+                    elif message_type == "parseArguments":
+                        _send_json(self.conn, {"messageType": "argumentsParsed"})
+                    elif message_type == "setupRemote":
+                        _send_json(
+                            self.conn, {"messageType": "serverReadyForInputMapping"}
+                        )
+                    elif message_type == "inputFileInodesSent":
+                        _send_json(self.conn, {"messageType": "noExportFiles"})
+                    elif message_type == "startRemote":
+                        _send_json(self.conn, {"messageType": "jobId", "jobId": 77})
+                        _send_json(
+                            self.conn,
+                            {
+                                "messageType": "createdSessions",
+                                "sessions": [{"sessionId": 7701}, {"sessionId": 7702}],
+                            },
+                        )
+                        _send_json(
+                            self.conn,
+                            {
+                                "messageType": "writeStdout",
+                                "text": (
+                                    "=SUBMIT-PROGRESS=> aborted=0 finished=4 failed=0 "
+                                    "executing=0 waiting=1 setup=0 setting_up=0 "
+                                    "%done=80.00 timestamp=1.0\n"
+                                ),
+                            },
+                        )
+                    elif message_type == "null":
+                        continue
+            except (EOFError, socket.timeout):
+                return
+            except Exception as exc:  # pragma: no cover - test helper diagnostics
+                self.error = exc
+            finally:
+                self.conn.close()
+
+    server = _SubmitHangAfterLaunchServer("status", server_conn)
+    server.start()
+
+    client = _make_client()
+    result = client.submit(
+        SubmitRequest(
+            command="echo",
+            command_arguments=["hello"],
+            venues=["workspace"],
+        ),
+        operation_timeout=0.25,
+    )
+
+    _assert_server_ok(server)
+    assert result.timed_out is True
+    assert result.returncode == 124
+    assert result.job_id == 77
+    assert set(result.process_ids) == {77, 7701, 7702}
+    assert "timed out waiting for submit response" in result.stderr
+    tracked = client.list_tracked_runs()
+    assert len(tracked) == 1
+    assert tracked[0].timed_out is True
+    assert set(tracked[0].process_ids) == {77, 7701, 7702}
 
 
 def test_client_raw_help_uses_command_file_handshake(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -477,7 +588,7 @@ def test_client_submit_local_parameter_sweep_submit_progress(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    client = _make_client(local_fast_path=False)
+    client = _make_client()
     result = client.submit(
         SubmitRequest(
             command=sys.executable,
@@ -511,6 +622,41 @@ def test_client_submit_local_parameter_sweep_submit_progress(
     assert (run_path / "01" / "echotest_01.stdout").is_file()
     assert (run_path / "02" / "echotest_02.stdout").is_file()
     assert (run_path / "03" / "echotest_03.stdout").is_file()
+
+
+def test_monitor_tracked_runs_merges_session_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    client = _make_client()
+    result = client.submit(
+        SubmitRequest(
+            command=sys.executable,
+            command_arguments=[
+                "-c",
+                "import sys; print(sys.argv[1])",
+                "@@name",
+            ],
+            local=True,
+            run_name="tracktest",
+            separator=",",
+            parameters=["@@name=hub1,hub2"],
+            progress=ProgressMode.SUBMIT,
+        ),
+        operation_timeout=10.0,
+    )
+    assert result.returncode == 0, result
+
+    report = client.monitor_tracked_runs(root=tmp_path, max_depth=2)
+    assert report.ok is True
+    assert report.job_ids == []
+    assert len(report.runs) == 1
+    run_status = report.runs[0]
+    assert run_status.run.run_name == "tracktest"
+    assert run_status.local_session is not None
+    assert run_status.latest_progress is not None
+    assert run_status.latest_progress["percent_done"] == pytest.approx(100.0)
+    assert run_status.derived_state == "complete"
 
 
 def test_client_catalog_is_loaded_on_demand_and_cached(
