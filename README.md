@@ -18,6 +18,25 @@ submit server, without importing any legacy modules.
 python3 -m pip install -e .
 ```
 
+## Python-Only Tests
+
+```bash
+python3 -m pytest -q
+```
+
+Live integration tests (against a real submit server) are opt-in:
+
+```bash
+NANOHUBSUBMIT_LIVE=1 python3 -m pytest -q tests/test_live_client.py
+```
+
+Optional non-default config path:
+
+```bash
+NANOHUBSUBMIT_LIVE=1 NANOHUBSUBMIT_CONFIG_PATH=/etc/submit/submit-client.conf \
+python3 -m pytest -q tests/test_live_client.py
+```
+
 ## CLI examples
 
 ```bash
