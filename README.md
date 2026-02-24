@@ -18,6 +18,12 @@ submit server, without importing any legacy modules.
 python3 -m pip install -e .
 ```
 
+Notebook extras (includes `ipywidgets<8`):
+
+```bash
+python3 -m pip install -e ".[notebook]"
+```
+
 ## Python-Only Tests
 
 ```bash
@@ -92,3 +98,15 @@ submit server does not emit an exit frame (default is 60 seconds).
 
 `NanoHUBSubmitClient` uses `/etc/submit/submit-client.conf` by default. Pass
 `config_path=...` only when you need a non-default config file.
+
+## Jupyter Tutorial
+
+Open and run:
+
+- `notebooks/nanohubsubmit_tutorial.ipynb`
+
+The notebook includes:
+- End-to-end API usage examples
+- Local and remote submit patterns
+- Catalog/explore/status/kill/session examples
+- Interactive `ipywidgets` controls compatible with `ipywidgets<8`

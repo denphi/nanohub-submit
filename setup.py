@@ -29,6 +29,12 @@ setup(
     install_requires=[
         "importlib-metadata>=4.0; python_version < '3.8'",
     ],
+    extras_require={
+        "notebook": [
+            "ipykernel",
+            "ipywidgets<8",
+        ],
+    },
     entry_points={
         "console_scripts": [
             "nanohub-submit=nanohubsubmit.cli:main",
